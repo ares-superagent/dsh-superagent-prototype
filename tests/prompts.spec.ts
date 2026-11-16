@@ -97,6 +97,10 @@ it('rejects unknown keys, built-in skill names and oversized configuration befor
     expect(() => prompts.save({ communication: '', scope: '' }, 0, 'panel')).toThrow()
     for (const name of ['github', 'feishu']) expect(() => prompts.save({ ...defaultPrompts(), skills: { [name]: 'mine' } }, 0, 'panel')).toThrow('built-in skill')
     expect(() => prompts.save({ ...defaultPrompts(), skills: { 'Bad Name': 'x' } }, 0, 'panel')).toThrow()
+    // A team skill is registered from its instructions alone, so an empty one cannot be saved.
+    for (const text of ['', '   ']) expect(() => prompts.save({ ...defaultPrompts(), skills: { release: text } }, 0, 'panel')).toThrow('cannot be empty')
+    // A draft may still hold a skill being written, so its preview is allowed.
+    expect(prompts.preview({ ...defaultPrompts(), skills: { release: '' } }).skills.release).toBe('')
     expect(() => promptsOf(store, 1000).save(defaultPrompts(), 0, 'panel')).toThrow('exceeds')
     expect(prompts.current().revision).toBe(0)
   })

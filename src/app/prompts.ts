@@ -201,6 +201,10 @@ export class Prompts {
   }
   save(value: unknown, baseRevision: number, source: SettingsOrigin): PromptVersion {
     const config = this.validate(value)
+    // A team skill is registered from its instructions alone, so saving an empty body would register a skill the model
+    // cannot use; reject it like an empty override rather than leave the half-created skill behind. Previews stay
+    // allowed, so a draft with a skill still being written can be inspected before it is saved.
+    for (const [name, text] of Object.entries(config.skills)) if (!text.trim()) throw new UserError('skillEmpty', { skill: name })
     return this.store.atomic(() => {
       const previous = this.current()
       if (previous.revision !== baseRevision) throw new PromptConflict(`Prompt version changed to ${previous.revision}; compare the latest version before saving`)

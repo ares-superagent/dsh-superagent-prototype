@@ -2,9 +2,9 @@
 // The Prompts settings.
 import { act } from 'react'
 import { builtInBase, builtInParts, defaultPrompts } from '../src/app/prompts.ts'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { zh } from '../src/client/locales.ts'
-import { usePanel, mount, settle, all, tab, click, type, text, field, at } from './fixtures/panel.tsx'
+import { usePanel, mount, settle, all, tab, click, type, text, field, find, at } from './fixtures/panel.tsx'
 import { server, promptVersion } from './fixtures/panel-server.ts'
 
 usePanel()
@@ -235,4 +235,36 @@ it('loads a version from the history without its overrides of parts this version
   server.prompts.current = saved
   await click(zh.save)
   expect(server.prompts.current.config.overrides).toEqual({ 'runtime/dispatch': dispatch })
+})
+
+it('keeps the prompt editor read-only while a save and its revision are in flight, then unlocks it', async () => {
+  at({ page: 'settings', query: { group: 'prompts' } })
+  await mount()
+  await type(field<HTMLTextAreaElement>(zh.promptBody), 'Mine')
+  const base = globalThis.fetch
+  let releasePut!: () => void
+  let releaseReload!: () => void
+  const putGate = new Promise<void>(resolve => { releasePut = resolve })
+  const reloadGate = new Promise<void>(resolve => { releaseReload = resolve })
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (url.endsWith('/orchestrator/api/prompts')) await (init?.method === 'PUT' ? putGate : reloadGate)
+    return base(input as RequestInfo, init)
+  }))
+  await act(async () => { find(zh.save).click() })
+  await settle()
+  // While the PUT runs the reducer holds edits, so the editor must not take them.
+  expect(field<HTMLTextAreaElement>(zh.promptBody).readOnly).toBe(true)
+  expect(field<HTMLTextAreaElement>(zh.promptBody).value).toBe('Mine')
+  expect(field<HTMLInputElement>(zh.promptAddSkill).disabled).toBe(true)
+  releasePut()
+  await settle()
+  // The save returned; its revision is still awaited and edits stay held.
+  expect(field<HTMLTextAreaElement>(zh.promptBody).readOnly).toBe(true)
+  expect(field<HTMLInputElement>(zh.promptAddSkill).disabled).toBe(true)
+  releaseReload()
+  await settle()
+  expect(server.prompts.current.config.communication).toBe('Mine')
+  expect(field<HTMLTextAreaElement>(zh.promptBody).readOnly).toBe(false)
+  expect(field<HTMLInputElement>(zh.promptAddSkill).disabled).toBe(false)
 })
