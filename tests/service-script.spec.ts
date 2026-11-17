@@ -84,6 +84,14 @@ it('takes no `dsh plugin` command of the profile for its service', async () => {
     `${service} node node /opt/my tools/dsh --profile superagent --no-open`)
   expect(await status('superagent')).toMatchObject({ pids: [service] })
 })
+it('finds a service whose ps command name is MainThread, and still ignores tmux, sleep and dsh plugin', async () => {
+  const pid = sleeper()
+  processes(`${pid} MainThread node /opt/dsh --profile superagent --no-open`,
+    `${sleeper()} tmux tmux new-session -d --profile superagent`,
+    `${sleeper()} sleep sleep 60`,
+    `${sleeper()} node node /opt/dsh plugin --profile superagent add link:/x`)
+  expect(await status('superagent')).toMatchObject({ pids: [pid] })
+})
 it('records the service PID at start, and still refuses a second instance the scan finds', async () => {
   const url = await answering()
   const pid = sleeper()
