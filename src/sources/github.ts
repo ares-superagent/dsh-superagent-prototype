@@ -127,21 +127,43 @@ export function pollFailure(failures: number, threshold: number, error: unknown)
 async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   let interval = 60
   let failures = 0
+  // A full round (notifications, CI and subscribed Threads) keeps GitHub's notification interval; the repository streams
+  // that carry new Issues, PRs and comments run between full rounds, so such a request is seen within `STREAM_POLL_MS`.
+  let untilRound = 0
   await ctx.ready
   // Setup restarts dsh-superagent once it resolves the accounts; until then nothing is polled.
   if (!ctx.configured()) { ctx.report('github', health('paused', 'setupPending')); return }
   while (!signal.aborted) {
     const config = ctx.config<GithubConfig>(SOURCE)
+    const full = Math.max(interval, config?.pollSeconds ?? 60) * 1000
+    const streams = !!config && STREAMS.some(stream => stream.observed(config))
+    let wait = full
     try {
-      if (config) interval = await pollRound(ctx, signal)
-      else ctx.report('github', health('paused', 'sourceOff'))
-      failures = 0
+      if (!config) ctx.report('github', health('paused', 'sourceOff'))
+      else if (!streams) {
+        // Nothing is observed between rounds: one full round per interval, as before.
+        interval = await pollRound(ctx, signal)
+        failures = 0
+        wait = Math.max(interval, config.pollSeconds) * 1000
+      } else if (untilRound <= 0) {
+        interval = await pollRound(ctx, signal)
+        untilRound = Math.max(interval, config.pollSeconds) * 1000
+        // Only a full round clears consecutive failures: a stream poll that found nothing is not a full recovery.
+        failures = 0
+        wait = Math.min(STREAM_POLL_MS, untilRound)
+      } else {
+        await pollStreamRound(ctx, signal)
+        wait = Math.min(STREAM_POLL_MS, untilRound)
+      }
+      untilRound = Math.max(0, untilRound - wait)
     } catch (error) {
       failures += 1
+      untilRound = 0
+      wait = Math.max(interval, config?.pollSeconds ?? 60) * 1000
       const failed = pollFailure(failures, config?.failuresBeforeError ?? 1, error)
       if (!signal.aborted && failed) ctx.report('github', failed)
     }
-    await pause(Math.max(interval, ctx.config<GithubConfig>(SOURCE)?.pollSeconds ?? 60) * 1000, signal)
+    await pause(Math.max(1_000, wait), signal)
   }
 }
 interface Round {
@@ -175,8 +197,14 @@ const STREAMS = [
   { id: 'comments', observed: (config: GithubConfig) => config.observeComments, path: 'issues/comments?' },
   { id: 'review-comments', observed: (config: GithubConfig) => config.observeComments, path: 'pulls/comments?' },
 ] as const
-/** Polls repository-wide streams (new Issues/PRs, comments, default-branch CI); each stream reads from when it was switched on, resets when switched off, and fails independently. */
-async function pollRepository(ctx: SourceContext, round: Round): Promise<void> {
+/**
+ * How often the repository event streams are polled between full rounds. A stream whose cursor has not moved sends the last
+ * page's ETag, so an unchanged list costs one conditional request and no rate limit; the three streams stay far under the
+ * hourly budget. `pollSeconds` keeps governing the full round, whose notification endpoint asks for 60 seconds or more.
+ */
+export const STREAM_POLL_MS = 10_000
+/** Polls the repository-wide streams (new Issues/PRs, comments); each reads from when it was switched on, resets when switched off, and fails independently. */
+async function pollStreams(ctx: SourceContext, round: Round): Promise<void> {
   const config = ctx.config<GithubConfig>(SOURCE)
   if (!config) return
   for (const stream of STREAMS) {
@@ -185,6 +213,13 @@ async function pollRepository(ctx: SourceContext, round: Round): Promise<void> {
     try { await readStream(ctx, round, stream.id, stream.path, config) }
     catch (error) { if (!stopped(ctx, round)) round.failures.push(`${stream.id}: ${String(error)}`) }
   }
+}
+/** Polls the repository-wide streams and the default-branch CI; each part reads from when it was switched on, resets when switched off, and fails independently. */
+async function pollRepository(ctx: SourceContext, round: Round): Promise<void> {
+  const config = ctx.config<GithubConfig>(SOURCE)
+  if (!config) return
+  await pollStreams(ctx, round)
+  if (stopped(ctx, round)) return
   // When CI observation is turned off, clear the failure baseline but preserve the revision counter so future triggers have unique IDs.
   if (!config.observeCi) {
     const seen = ctx.state.get(KV.github.branchCi)
@@ -193,6 +228,12 @@ async function pollRepository(ctx: SourceContext, round: Round): Promise<void> {
   }
   try { await pollBranchCi(ctx, round) }
   catch (error) { if (!stopped(ctx, round)) round.failures.push(`default branch CI: ${String(error)}`) }
+}
+/** Polls only the repository streams, for the fast polls between full rounds; a failed stream read fails this poll. */
+async function pollStreamRound(ctx: SourceContext, signal: AbortSignal): Promise<void> {
+  const round = newRound(signal)
+  await pollStreams(ctx, round)
+  if (round.failures.length) throw new Error(`${round.failures.length} GitHub reads failed: ${round.failures.slice(0, 3).join('; ')}`)
 }
 /**
  * Polls one repository-wide event stream (oldest first) since its cursor and steps the cursor to five seconds before the
