@@ -8,7 +8,7 @@ import { runFeishu } from '../src/sources/feishu-loops.ts'
 import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
 import { claimPull, observePull, pullEndNotices, pullOf, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
 import { ciCounts, ciFact, ciSummary } from '../src/sources/github-read.ts'
-import { apply as applyGithub, githubKind, pollFailure, pollRound } from '../src/sources/github.ts'
+import { apply as applyGithub, githubKind, pollFailure, pollRound, STREAM_POLL_MS } from '../src/sources/github.ts'
 import { pollThreads as pollGithubThreads } from '../src/sources/github.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { cursorAt, POLL_HORIZON_MS } from '../src/sources/poll.ts'
@@ -800,6 +800,42 @@ describe('github source', () => {
       await vi.waitFor(() => expect(flaky.value.health.github).toMatchObject({ state: 'error', code: 'pollFailures', values: { count: '2' } }))
       await flaky.stop()
       run.mockRestore()
+    } finally { vi.useRealTimers() }
+  })
+  it('polls the repository streams between full rounds, so a new comment arrives without waiting for the notification interval', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const board = new HealthBoard()
+      const settings = SettingsSchema.parse({ sources: { github: { enabled: true, config: { observeComments: true } } } })
+      const sources = new SourceRegistry(() => settings, board)
+      healthOf.set(sources, board)
+      const value = host({ sources })
+      let visible = false
+      const calls: string[][] = []
+      vi.spyOn(Commands.prototype, 'run').mockImplementation(async (_program, args) => {
+        calls.push(args)
+        const path = args[1]!.replace(/^repos\/acme\/widgets\//, '').split('?')[0]!
+        if (path === 'issues/comments') return `HTTP/2.0 200 OK\r\n\r\n${JSON.stringify(visible ? [{ id: 9,
+          body: '@agent-bot please fix', user: { login: 'alice', type: 'User' },
+          issue_url: 'https://api.github.com/repos/acme/widgets/issues/12',
+          html_url: 'https://github.com/acme/widgets/issues/12#issuecomment-9',
+          created_at: new Date().toISOString(), updated_at: new Date().toISOString() }] : [])}`
+        return 'HTTP/2.0 200 OK\r\nX-Poll-Interval: 60\r\n\r\n[]'
+      })
+      const disposers: (() => unknown)[] = []
+      applyGithub({ orchestrator: value, effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never)
+      const stop = async () => { for (const dispose of disposers) await dispose(); value.store.close() }
+      // The first full round reads the streams and reports ready; the next full round is a minute away.
+      await vi.waitFor(() => expect(value.health.github).toMatchObject({ state: 'ready' }))
+      visible = true
+      // Flush the full round's continuation, which parks the loop on its stream poll timer.
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(STREAM_POLL_MS)
+      // The stream poll alone took the comment in: only the first full round read notifications.
+      await vi.waitFor(() => expect(value.receive)
+        .toHaveBeenCalledWith(expect.objectContaining({ text: '@agent-bot please fix' })))
+      expect(calls.filter(args => args[1]!.includes('/notifications'))).toHaveLength(1)
+      await stop()
     } finally { vi.useRealTimers() }
   })
   it('reports a failure that escapes the polling loop as its health instead of an unhandled rejection', async () => {

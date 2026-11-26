@@ -157,3 +157,38 @@ it('says when no Source is on, an Eval is past its deadline or a message keeps f
   await click('评估超时未决定：#9 迟迟未决')
   expect(server.requests.some(request => request.path.startsWith('threads/github:9'))).toBe(true)
 })
+
+it('warns above the page with the crossed severity, the exact amount, its threshold and its action, and nothing when healthy', async () => {
+  const shown = (level: 'low' | 'recommend' | 'critical', remaining: string, threshold: string) => ({
+    status: 'low' as const, level, provider: 'deepseek-official', model: 'deepseek-flash', source: 'api-key' as const,
+    checkedAt: '2026-09-23T00:00:00Z', wallets: [{ currency: 'USD', remaining, threshold, level }],
+  })
+  server.balance = shown('low', '1.50', '2.00')
+  await mount()
+  let banner = document.querySelector('.dt-balance-warning')!
+  expect(banner.getAttribute('role')).toBe('alert')
+  expect(banner.textContent).toContain(zh.balanceLow)
+  expect(banner.textContent).toContain('USD 1.50')
+  expect(banner.textContent).toContain('2.00')
+  expect(banner.textContent).toContain(zh.balanceActionLow)
+  expect(banner.classList.contains('dt-danger')).toBe(false)
+
+  server.balance = shown('recommend', '0.75', '1.00')
+  await remount()
+  banner = document.querySelector('.dt-balance-warning')!
+  expect(banner.textContent).toContain(zh.balanceRecommend)
+  expect(banner.textContent).toContain(zh.balanceActionRecommend)
+  expect(banner.classList.contains('dt-danger')).toBe(true)
+  expect(banner.classList.contains('dt-balance-critical')).toBe(false)
+
+  server.balance = shown('critical', '0.25', '0.50')
+  await remount()
+  banner = document.querySelector('.dt-balance-warning')!
+  expect(banner.textContent).toContain(zh.balanceCritical)
+  expect(banner.textContent).toContain(zh.balanceActionCritical)
+  expect(banner.classList.contains('dt-balance-critical')).toBe(true)
+
+  server.balance = { status: 'ok', provider: 'deepseek-official', model: 'deepseek-flash', source: 'api-key', wallets: [] }
+  await remount()
+  expect(document.querySelector('.dt-balance-warning')).toBeNull()
+})

@@ -94,8 +94,45 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | --- | --- | --- |
 | `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
+| `balance` | no | Read-only low-balance warnings: whether to run, the interval and cooldown in minutes, the credential reference and the three severity levels per currency |
 
 After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
+
+### Balance warnings
+
+dsh-superagent checks the balance of the provider the main Session runs on, at startup and then every 30 minutes, without a model call. It reads only the exact remaining balance:
+
+- For the DeepSeek API-key route (`deepseek-official`), the official `GET https://api.deepseek.com/user/balance` endpoint with the credential named by `balance.apiKeyEnv` (default `DEEPSEEK_API_KEY`), resolved through DeepSeek Harness's credential service. The response's `total_balance` is the exact remaining API balance, including granted and topped-up credit.
+- For the signed-in Platform route (`deepseek-account`), the harness's read-only account service, which returns the recharge and bonus wallets. The monitor sums them per currency for the warning; this is the Platform wallet balance, not a token estimate.
+
+The USD severity ladder defaults to **$2 low (plan a top-up)**, **$1 top-up recommended**, and **$0.50 critical**. Checks run every **30 minutes**. A still-low balance of the same severity is announced at most every **6 hours**, while a more severe level is announced immediately, so a critical balance is not held back by the cooldown. There is **no CNY default**: CNY is checked only when a CNY ladder is explicitly configured, and a currency without a ladder is not checked. The DeepSeek endpoint exposes no budget or quota total, so there is no percentage threshold: a percentage of an operator-chosen budget would be an estimate, not the provider's remaining quota. Nothing here estimates token spend or treats token usage as a balance.
+
+A low balance produces:
+
+- the panel's warning banner, naming the severity, the provider, the exact remaining amount, the threshold, the check time and the action;
+- the owned `balance` health entry with the matching severity code, so `scripts/dsh-superagent status` exits 2 and the hourly check tells the operator;
+- one durable main-Session notice per severity per cooldown. An escalation notifies immediately; the banner stays visible until the balance recovers.
+
+To change the settings, add the `balance` block to the `dsh-superagent` entry in the profile's `cordis.patch.yml` and restart dsh-superagent:
+
+```yaml
+- id: dsh-superagent
+  config:
+    stateDir: /home/me/.dsh/state/superagent
+    balance:
+      enabled: true
+      intervalMinutes: 30
+      cooldownMinutes: 360
+      thresholds:
+        USD: { low: 2, recommend: 1, critical: 0.5 }
+        # CNY: { low: <amount>, recommend: <amount>, critical: <amount> }  # only if the account is in CNY
+```
+
+The defaults above are the approved USD ladder. A partial USD override keeps the other USD defaults; a CNY ladder must set all three levels because no CNY values are invented. The normalizer refuses a ladder whose `low` is below its `recommend`, or whose `recommend` is below its `critical`.
+
+`endpoint` and `apiKeyEnv` are for an official proxy or a differently named credential. The credential value is only sent in the request's `Authorization` header; it is never logged, stored in the database, or shown in the panel. The check makes no model request and spends no tokens. If the main Session runs on a provider without a known read-only balance endpoint, no credential is configured, or the account currency has no configured ladder, no warning is produced and `GET state` reports why in `balance`. A CNY-only account therefore needs an explicit CNY ladder before it warns.
+
+The check runs even while setup waits: a low balance does not depend on the repository or the Sources. If setup has not resolved yet, the panel still shows the warning banner. The values become active when the deployment starts this code; in the currently running service they are not active until it is rebuilt and restarted with the merged change.
 
 ## Start and stop
 
@@ -138,7 +175,7 @@ Create the hourly check in the DeepSeek Harness profile you normally use, not in
 Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` in <checkout>. Exit 0: do nothing and say nothing. Exit 2: do not restart; tell me each part under `errors` with its detail, unless you already told me about the same ones. Exit 3: do not restart; tell me what `setup` says setup needs, unless you already told me. If it reports manually_stopped: true, leave it stopped. Otherwise (exit 1) run `scripts/dsh-superagent --profile superagent --respect-stop restart`, which exits the same way: 0 means it recovered, so say nothing; 2 and 3 are reported as above; if it exits 1 or fails otherwise, read the newest .artifacts/dsh-superagent-superagent-*.log and the Troubleshooting section of docs/006-deployment.md, fix what you can, and tell me what was wrong and what you did.
 ```
 
-`--respect-stop` preserves an intentional stop. Only `stop` writes the marker; `start` clears it. `restart` writes no marker, so the check can recover a restart whose shutdown timed out.
+`--respect-stop` preserves an intentional stop. The same check reports a low provider balance through the `balance` health entry: replenish the account rather than restarting the service. Only `stop` writes the marker; `start` clears it. `restart` writes no marker, so the check can recover a restart whose shutdown timed out.
 
 ## Settings
 
@@ -168,7 +205,7 @@ Agents may rely on these routes and fields. The other routes in `src/app/api.ts`
 
 | Request | Answer |
 | --- | --- |
-| `GET state` | What every page reads: `setup`, with `problem` and `feishuProblem`, each `null` or a setup problem with `place`, `code`, `values` and `detail`, and `accounts` once setup resolved them; `health`, an entry per part, below, with `state` (`starting`, `ready`, `paused` or `error`), `detail` and `at`; `load`, the Executor Sessions `running`, the Tickets `queued` and `maxWorkers`; `paused`; and `masterId` |
+| `GET state` | What every page reads: `setup`, with `problem` and `feishuProblem`, each `null` or a setup problem with `place`, `code`, `values` and `detail`, and `accounts` once setup resolved them; `health`, an entry per part, below, with `state` (`starting`, `ready`, `paused` or `error`), `detail` and `at`; `load`, the Executor Sessions `running`, the Tickets `queued` and `maxWorkers`; `paused`; `masterId`; and `balance`, the latest read-only provider balance reading with its status, provider, source, check time, wallets and threshold |
 | `GET settings` | `blocks`: `policy`, `eval` and `executor`, each with its `value` and its `revision`; `sources`: the Source instances, each with `id`, `kind`, `installed`, its block's `value`, `{"enabled": …, "config": {…}}`, and `revision`, its kind's form, and its setup `problem` when it has one; `policyVersion`; and `environment`, the execution environment's `root` and `variables` |
 | `GET sources` | Each Source's status: `state` (`missing`, `off`, `error`, `setup`, `starting`, `paused` or `ready`), the `health` of its parts, its setup `problem`, the last day's `stats`, the Triggers it `filtered` in that day, and the messages it `dropped` in that day, newest drop first, each with its `channel`, `preview`, `ticket` (`id` and `title`) when it was for one, its `thread` when the store has it, and `dropped.at` and `dropped.reason`, `channelGone` or `channelIgnored` |
 | `PUT settings/<block>` with `{"value": …, "revision": n}` | Saves one block: `saved`, the block's new `revision`, `policy_changed` and `restarting`. `value` is the whole block, as `GET settings` holds it; a missing key takes its default |
@@ -184,6 +221,7 @@ Health entries are grouped by responsibility:
 | --- | --- |
 | `runtime` | The application itself |
 | `models` | Sessions waiting on a model-budget retry |
+| `balance` | The active provider's balance: `error` while it is at or below the configured threshold, with the remaining amount, provider and check time |
 | `evals` | Unavailable Evals from the last hour with no later judgement or dismissal |
 | `assessment`, `launch`, `delivery`, `relay`, `notice`, `reply` | Stored work described in [003 Execution](003-execution.md); delivery counts waiting work, while reply covers Channel messages |
 | `worker` | Executor Session event handling; appears after its first failure |
