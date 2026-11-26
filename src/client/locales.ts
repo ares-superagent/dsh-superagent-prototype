@@ -15,6 +15,14 @@ const TEXT = {
   loadMore: ['加载更多', 'Load more'],
   offline: ['无法连接到 dsh-superagent 服务。请确认它正在运行（dsh-superagent status），然后重试。', 'Cannot reach the dsh-superagent service. Check that it is running (dsh-superagent status), then retry.'],
   serverError: ['dsh-superagent 服务内部错误（{status}），请查看运行日志后重试。', 'dsh-superagent service error ({status}). Check the log, then retry.'],
+  balanceLow: ['API 余额偏低', 'API balance low'],
+  balanceProviderApi: ['DeepSeek API', 'DeepSeek API'],
+  balanceProviderAccount: ['DeepSeek 平台钱包', 'DeepSeek Platform wallet'],
+  balanceLowDetail: ['{provider} 账户剩余 {wallets}，低于配置的阈值。', '{provider} has {wallets} remaining, below the configured threshold.'],
+  balanceLowUnavailable: ['提供方报告账户没有可用余额。', 'The provider reports no available balance.'],
+  balanceLowAction: ['API 资金即将不足，请为账户充值。', 'API funds are running low; replenish the account.'],
+  balanceChecked: ['检查时间：{at}。', 'Checked {at}.'],
+  balanceCheckFailed: ['最近一次检查失败；显示的是最后一次成功的读数。', 'The latest check failed; this is the last successful reading.'],
   requestFailed: ['请求失败（{status}）。', 'Request failed ({status}).'],
   empty: ['—', '—'],
   yes: ['是', 'Yes'],
@@ -45,6 +53,7 @@ const TEXT = {
   'health.reply': ['发往渠道的消息', 'Messages to Channels'],
   'health.worker': ['执行器事件处理', 'Executor event handling'],
   'health.evals': ['未完成的评估', 'Unavailable Evals'],
+  'health.balance': ['API 余额', 'API balance'],
   none: ['暂无。', 'None.'],
   openSession: ['打开 Session', 'Open Session'],
   stop: ['停止', 'Stop'],
@@ -747,6 +756,7 @@ const TEXT = {
   'healthCode.feishuCliUnset': ['来源已打开，还没有设置机器人的 lark-cli', HEALTH_TEXT.feishuCliUnset],
   'healthCode.feishuBotMissing': ['等待飞书机器人', HEALTH_TEXT.feishuBotMissing],
   'healthCode.pollFailures': ['连续 {count} 次轮询失败，最近一次：{error}', HEALTH_TEXT.pollFailures],
+  'healthCode.balanceLow': ['API 余额偏低：{wallets}；提供方 {provider}；检查时间 {checkedAt}。请为账户充值。', HEALTH_TEXT.balanceLow],
 } as const satisfies Record<string, readonly [string, string]>
 export type DshSuperagentKey = keyof typeof TEXT
 const language = (index: 0 | 1) => Object.fromEntries(Object.entries(TEXT).map(([key, pair]) => [key, pair[index]])) as Record<DshSuperagentKey, string>

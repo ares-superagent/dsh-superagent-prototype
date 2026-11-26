@@ -13,7 +13,7 @@ import { HOME, TABS, initialLocation, lastSettingsGroup, remember, routeLabel, s
   type Tab } from './route.ts'
 import { SettingsPage } from './settings.tsx'
 import { SourceStatus } from './source.tsx'
-import { actorName, errorText, reasonLabel, valueLabel, type T, readableMarkers } from './text.ts'
+import { actorName, errorText, reasonLabel, valueLabel, type T, readableMarkers, when } from './text.ts'
 import { ThreadPage } from './thread.tsx'
 import { TicketPage } from './ticket.tsx'
 import { TriggerStatus } from './trigger.tsx'
@@ -138,6 +138,26 @@ function Header({ masterId }: { masterId: string | undefined }) {
   </header>
 }
 
+/** The panel's low-balance warning: the provider, the remaining amount and threshold, the check time and the action. */
+function BalanceWarning() {
+  const { t } = usePanel()
+  const { state } = usePanelData()
+  const balance = state?.balance
+  if (balance?.status !== 'low') return null
+  const low = balance.wallets.filter(wallet => wallet.low)
+  const wallets = low.map(wallet => `${wallet.currency} ${wallet.remaining} < ${wallet.threshold}`).join(' · ')
+  const provider = balance.provider === 'deepseek-account' ? t('balanceProviderAccount')
+    : balance.provider === 'deepseek-official' ? t('balanceProviderApi') : balance.provider ?? ''
+  return <div className="dt-banner dt-danger dt-balance-warning" role="alert">
+    <span className="dt-banner-label">{t('balanceLow')}</span>
+    <span>{low.length ? t('balanceLowDetail', { provider, wallets }) : t('balanceLowUnavailable')}</span>
+    <span>{t('balanceLowAction')}</span>
+    {balance.checkedAt && <span className="dt-hint">{t('balanceChecked', { at: when(balance.checkedAt, t('lang')) })}</span>}
+    {balance.attemptedAt && balance.checkedAt && balance.attemptedAt !== balance.checkedAt
+      && <span className="dt-hint">{t('balanceCheckFailed')}</span>}
+  </div>
+}
+
 function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab: Tab) => void; deploymentForm: DeploymentForm }) {
   const { t } = usePanel()
   const { state, error, reload } = usePanelData()
@@ -161,6 +181,7 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
   return <div className="dt-page">
     <div className="dt-column">
       <Header masterId={state?.masterId} />
+      <BalanceWarning />
       {error && state && <p className="dt-error" role="status">{error.message}</p>}
       <SegmentedTabs className="dt-tabs" label={t('pagesLabel')} value={route.page} onChange={openTab}
         items={TABS.map(value => ({ value, label: t(`tab.${value}`), id: `dt-tab-${value}`, panelId: 'dt-page' }))} />

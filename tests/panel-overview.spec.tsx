@@ -157,3 +157,17 @@ it('says when no Source is on, an Eval is past its deadline or a message keeps f
   await click('评估超时未决定：#9 迟迟未决')
   expect(server.requests.some(request => request.path.startsWith('threads/github:9'))).toBe(true)
 })
+
+it('warns above the page about a low provider balance, with the exact remaining amount and the action, and nothing when healthy', async () => {
+  server.balance = { status: 'low', provider: 'deepseek-official', model: 'deepseek-flash', source: 'api-key',
+    checkedAt: '2026-09-23T00:00:00Z', wallets: [{ currency: 'USD', remaining: '4.25', threshold: '5.00', low: true }] }
+  await mount()
+  const banner = document.querySelector('.dt-balance-warning')!
+  expect(banner.getAttribute('role')).toBe('alert')
+  expect(banner.textContent).toContain(zh.balanceLow)
+  expect(banner.textContent).toContain('USD 4.25 < 5.00')
+  expect(banner.textContent).toContain(zh.balanceLowAction)
+  server.balance = { status: 'ok', provider: 'deepseek-official', model: 'deepseek-flash', source: 'api-key', wallets: [] }
+  await remount()
+  expect(document.querySelector('.dt-balance-warning')).toBeNull()
+})

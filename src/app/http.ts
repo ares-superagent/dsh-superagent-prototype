@@ -18,6 +18,7 @@ import type { Health } from '../sources/host.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import type { Sessions } from './sessions.ts'
 import type { Store } from './store.ts'
+import type { BalanceMonitor } from './balance.ts'
 import type { TextCache } from './cache.ts'
 import type { LinkTarget, ViewHost } from './views/records.ts'
 import type { Variable } from './execution-environment.ts'
@@ -36,6 +37,8 @@ export interface HttpHost {
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'preview' | 'save' | 'defaultChanged'>
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
+  /** Read-only provider balance state and its warning. */
+  readonly balance: Pick<BalanceMonitor, 'view'>
   readonly engine: EngineForPeople
   readonly executor: Pick<DshExecutor, 'activeCount'>
   readonly health: Record<string, Health>
@@ -106,7 +109,7 @@ export function stateView(runtime: HttpHost) {
   const settings = runtime.store.settings()
   return { setup: setupView(runtime), load: { ...executorLoad(runtime.store, runtime.executor.activeCount()),
     maxWorkers: settings.executor.maxWorkers },
-    masterId: runtime.masterId, paused: settings.paused, health: runtime.health }
+    masterId: runtime.masterId, paused: settings.paused, health: runtime.health, balance: runtime.balance.view() }
 }
 const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources: runtime.sources, links: runtime.links() })
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,

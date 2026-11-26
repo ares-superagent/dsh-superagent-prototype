@@ -11,6 +11,24 @@ import { SetupError } from './setup.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
 const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
+/** Read-only low-balance warning settings; changing them requires restarting dsh-superagent. */
+export const BalanceConfig = s.object({
+  enabled: s.boolean().default(true)
+    .description('Check the active provider\'s balance at startup and periodically, and warn when it is low.'),
+  intervalMinutes: s.number().min(1).max(1440).step(1).default(30)
+    .description('Minutes between balance checks after the startup check.'),
+  cooldownMinutes: s.number().min(1).max(10080).step(1).default(360)
+    .description('Minutes before a still-low balance produces another main-Session notice. The panel warning stays visible.'),
+  endpoint: s.string().default('https://api.deepseek.com/user/balance')
+    .description('Official read-only balance endpoint; change it only for an official proxy of the same API.'),
+  apiKeyEnv: s.string().pattern(/^[A-Za-z_][A-Za-z0-9_]*$/).default('DEEPSEEK_API_KEY')
+    .description('Credential reference resolved through DSH for the DeepSeek API-key route.'),
+  thresholds: s.object({
+    USD: s.number().min(0).default(5).description('Low-balance threshold in US dollars.'),
+    CNY: s.number().min(0).default(20).description('Low-balance threshold in Chinese yuan.'),
+  }).description('Absolute low-balance threshold per currency the endpoint documents.'),
+})
+export type BalanceConfig = ReturnType<typeof BalanceConfig>
 /** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
 export const Config = s.object({
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
@@ -20,6 +38,7 @@ export const Config = s.object({
     .description('Pages of thread context one assessment may read.').volatile(),
   admissionContextTimeoutMs: s.number().min(LIMITS.admissionContextTimeoutMs.min).max(LIMITS.admissionContextTimeoutMs.max).step(1)
     .default(15000).description('Time limit of one context read during an assessment, in milliseconds.').volatile(),
+  balance: BalanceConfig.default({}),
 })
 export type DeploymentConfig = ReturnType<typeof Config>
 export interface Machine {
@@ -27,6 +46,7 @@ export interface Machine {
   promptMaxChars: Volatile<number>
   admissionContextMaxPages: Volatile<number>
   admissionContextTimeoutMs: Volatile<number>
+  balance: BalanceConfig
 }
 const MOVED: Record<string, string> = {
   repository: 'on the GitHub Source', branchPrefix: 'in the prepare command of the Execution settings', github: 'on the GitHub Source',
@@ -38,8 +58,8 @@ const MOVED: Record<string, string> = {
 export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
-  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
+  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, balance } = config
+  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, balance }
 }
 
 export const GithubAccountsSchema = z.object({

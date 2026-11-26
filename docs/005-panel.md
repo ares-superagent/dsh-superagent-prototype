@@ -14,6 +14,8 @@ Opening the panel answers three questions, in this order:
 
 The tabs follow the workflow: **Overview**, **Source**, **Trigger**, **Eval**, **Execution**, and **Settings**. Until repository and account setup succeeds, Overview shows what is missing and links to the relevant setting.
 
+When the provider the main Session runs on is at or below its configured balance threshold, a banner above the tabs names the provider, the exact remaining amount, the threshold, the check time and the action. It stays until the balance recovers; 006 Deployment documents the thresholds, interval and cooldown.
+
 | Tab | Shows |
 | --- | --- |
 | Overview | Tickets needing action, system problems, activity counts for the last 24 hours, and Executor load. Each block links to its detailed page |
