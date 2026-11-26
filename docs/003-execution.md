@@ -46,6 +46,14 @@ Stopping or restarting the plugin inside the DeepSeek Harness process uses the s
 
 Worker subagents, including nested ones, use DeepSeek Harness's `standard` preset with the worker's permissions. They retain only the worker's allowed work tools, and lose those tools when the Ticket ends. Under `standard`, a shell command moves to the background after 60 seconds. A subagent's jobs are killed when it ends.
 
+### Progress updates
+
+While an Assignment runs, the runtime publishes a concise progress update to the conversation the Ticket started in about every ten minutes. It reads what is already stored — the Assignment, its latest Report, the Ticket's stage and the worker Session's last recorded activity — so it asks the model for nothing and needs no tool call. A worker's latest `progress` Report supplies what is complete; a worker that has not reported leaves the runtime to say so.
+
+Each update states what is complete, what runs now, the next action and any blocker. It tells a worker that is running a tool call, waiting for the model, holding a worker slot in the queue, or running background jobs; after thirty minutes without a recorded Session event it reports the Assignment as looking stalled, names the last activity it saw, and says it cannot tell a hung model call from a hung tool call. A `queued` or `stalled` state goes out once, until it changes, so a long wait does not repeat the same message. An update that has gone out resets the ten-minute interval.
+
+Updates stop once the Ticket leaves `working`: a result, a question for a person, a blocker, a failed delivery or an idle worker is already reported by the Report itself. A GitHub update begins with the automated-agent line. The Assignment stores when the runtime last spoke and what it said, so a restart continues the cadence without a duplicate. The interval is fixed at ten minutes in the runtime; no settings or API token is involved.
+
 ### Preparing a Ticket directory
 
 Before the first Assignment, if the Ticket directory does not exist, the prepare command runs once with `sh` in the execution root. It has ten minutes to finish. Without a prepare command, the worker starts in an empty directory.

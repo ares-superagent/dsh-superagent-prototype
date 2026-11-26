@@ -7,14 +7,16 @@ import type { EngineOptions } from './part.ts'
 import { Assignments, type WorkerReport } from './assignments.ts'
 import { Evals, type Outcome } from './evals.ts'
 import { Intake, type ReceiveResult } from './intake.ts'
-import { Replies, type Reply, type ReplyRequest } from './replies.ts'
+import { Replies, type ProgressRequest, type Reply, type ReplyRequest } from './replies.ts'
 import { Tickets } from './tickets.ts'
 
 export type { EngineOptions } from './part.ts'
 export type { WorkerReport } from './assignments.ts'
 export type { Outcome } from './evals.ts'
 export type { ReceiveResult } from './intake.ts'
-export type { Reply, ReplyRequest } from './replies.ts'
+export type { ProgressRequest, Reply, ReplyRequest } from './replies.ts'
+/** A progress update the runtime asks the Engine to publish: its text, when it is queued, its due time, and what it says. */
+export type ProgressUpdate = Omit<ProgressRequest, 'purpose' | 'ticketId'>
 
 /**
  * Single transactional entry point for mutating Triggers, Threads, Decisions, Tickets, and Assignments.
@@ -133,6 +135,14 @@ export class Engine {
    * is not ready, completed, merged, or dropped.
    */
   reply(request: ReplyRequest): Reply { return this.repo.atomic(() => this.replies.reply(request)) }
+  /**
+   * Queue the runtime's progress update to the conversation a ticket started in, at most once per due time, and record it
+   * on the Assignment that runs the ticket; skipped silently once the ticket ended or waits for a report that leaves the
+   * `working` stage. The progress cadence (`src/app/progress.ts`) is its only caller.
+   */
+  publishProgress(ticketId: string, update: ProgressUpdate): Reply {
+    return this.repo.atomic(() => this.replies.progress({ purpose: 'progress', ticketId, ...update }))
+  }
 
   // People, through the panel or the main Session
 
