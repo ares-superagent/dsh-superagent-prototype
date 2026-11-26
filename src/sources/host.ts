@@ -14,7 +14,9 @@ export const HEALTH_TEXT = {
   feishuCliUnset: 'The Source is on, and its bot lark-cli is not set',
   feishuBotMissing: 'Waiting for the Feishu bot',
   pollFailures: '{count} consecutive failed polls; last: {error}',
-  balanceLow: 'API balance low: {wallets} remaining; provider {provider}; checked {checkedAt}. Replenish the account.',
+  balanceLow: 'API balance low: {wallets}; provider {provider}; checked {checkedAt}. Plan to top up the account.',
+  balanceRecommend: 'API balance low: {wallets}; provider {provider}; checked {checkedAt}. Top up the account soon.',
+  balanceCritical: 'API balance critical: {wallets}; provider {provider}; checked {checkedAt}. Top up the account now.',
 } as const
 export type HealthCode = keyof typeof HEALTH_TEXT
 export type Health = { state: 'starting' | 'ready' | 'paused' | 'error'; detail: string; at?: string; code?: HealthCode; values?: Record<string, string> }

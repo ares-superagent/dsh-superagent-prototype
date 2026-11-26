@@ -138,20 +138,27 @@ function Header({ masterId }: { masterId: string | undefined }) {
   </header>
 }
 
-/** The panel's low-balance warning: the provider, the remaining amount and threshold, the check time and the action. */
+/** The panel's low-balance warning: its severity, the provider, the remaining amount and threshold, the check time and the action. */
 function BalanceWarning() {
   const { t } = usePanel()
   const { state } = usePanelData()
   const balance = state?.balance
   if (balance?.status !== 'low') return null
-  const low = balance.wallets.filter(wallet => wallet.low)
-  const wallets = low.map(wallet => `${wallet.currency} ${wallet.remaining} < ${wallet.threshold}`).join(' · ')
+  const level = balance.level ?? 'low'
+  const low = balance.wallets.filter(wallet => wallet.level !== 'ok')
+  const wallets = low.map(wallet => t('balanceWallet', { currency: wallet.currency, remaining: wallet.remaining, threshold: wallet.threshold }))
+    .join(' · ')
   const provider = balance.provider === 'deepseek-account' ? t('balanceProviderAccount')
     : balance.provider === 'deepseek-official' ? t('balanceProviderApi') : balance.provider ?? ''
-  return <div className="dt-banner dt-danger dt-balance-warning" role="alert">
-    <span className="dt-banner-label">{t('balanceLow')}</span>
-    <span>{low.length ? t('balanceLowDetail', { provider, wallets }) : t('balanceLowUnavailable')}</span>
-    <span>{t('balanceLowAction')}</span>
+  const title = level === 'critical' ? t('balanceCritical') : level === 'recommend' ? t('balanceRecommend') : t('balanceLow')
+  const action = level === 'critical' ? t('balanceActionCritical') : level === 'recommend' ? t('balanceActionRecommend')
+    : t('balanceActionLow')
+  const tone = level === 'low' ? '' : ' dt-danger'
+  const critical = level === 'critical' ? ' dt-balance-critical' : ''
+  return <div className={`dt-banner${tone} dt-balance-warning${critical}`} role="alert">
+    <span className="dt-banner-label">{title}</span>
+    <span>{low.length ? t('balanceDetail', { provider, wallets }) : t('balanceLowUnavailable')}</span>
+    <span>{action}</span>
     {balance.checkedAt && <span className="dt-hint">{t('balanceChecked', { at: when(balance.checkedAt, t('lang')) })}</span>}
     {balance.attemptedAt && balance.checkedAt && balance.attemptedAt !== balance.checkedAt
       && <span className="dt-hint">{t('balanceCheckFailed')}</span>}

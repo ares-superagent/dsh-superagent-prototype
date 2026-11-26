@@ -12,7 +12,7 @@ export const testMachine = (overrides: Partial<Machine> = {}): Machine => ({
   admissionContextTimeoutMs: reference(15000),
   // Existing tests keep the monitor off; tests of the monitor construct it directly with their own clock and fetch.
   balance: { enabled: false, intervalMinutes: 30, cooldownMinutes: 360, endpoint: 'https://api.deepseek.com/user/balance',
-    apiKeyEnv: 'DEEPSEEK_API_KEY', thresholds: { USD: 5, CNY: 20 } },
+    apiKeyEnv: 'DEEPSEEK_API_KEY', thresholds: { USD: { low: 2, recommend: 1, critical: 0.5 } } },
   ...overrides,
 })
 export const testDeployment = (overrides: Partial<Deployment> = {}): Deployment => ({

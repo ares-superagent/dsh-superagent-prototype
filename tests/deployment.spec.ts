@@ -48,9 +48,20 @@ describe('configuration schema', () => {
       admissionContextTimeoutMs: read.admissionContextTimeoutMs.get() })
       .toEqual({ stateDir: join(dir, 'state'), promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000,
         balance: { enabled: true, intervalMinutes: 30, cooldownMinutes: 360, endpoint: 'https://api.deepseek.com/user/balance',
-          apiKeyEnv: 'DEEPSEEK_API_KEY', thresholds: { USD: 5, CNY: 20 } } })
+          apiKeyEnv: 'DEEPSEEK_API_KEY', thresholds: { USD: { low: 2, recommend: 1, critical: 0.5 } } } })
     expect(() => Config(minimal({ stateDir: 'relative/dir' }))).toThrow()
     expect(() => Config(minimal({ stateDir: '~/dir' }))).toThrow()
+  })
+  it('applies the approved USD ladder, allows a partial USD override, and validates explicitly configured CNY ladders', () => {
+    expect(machineOf(Config(minimal())).balance.thresholds).toEqual({ USD: { low: 2, recommend: 1, critical: 0.5 } })
+    expect(machineOf(Config(minimal({ balance: { thresholds: { USD: { low: 3 } } } }))).balance.thresholds.USD)
+      .toEqual({ low: 3, recommend: 1, critical: 0.5 })
+    expect(machineOf(Config(minimal({ balance: { thresholds: { CNY: { low: 20, recommend: 10, critical: 5 } } } }))).balance.thresholds)
+      .toEqual({ USD: { low: 2, recommend: 1, critical: 0.5 }, CNY: { low: 20, recommend: 10, critical: 5 } })
+    expect(() => machineOf(Config(minimal({ balance: { thresholds: { CNY: { low: 20 } } } }))))
+      .toThrow('balance thresholds for CNY must set low, recommend and critical numbers')
+    expect(() => machineOf(Config(minimal({ balance: { thresholds: { USD: { low: 1, recommend: 2, critical: 0.5 } } } }))))
+      .toThrow('balance thresholds for USD must satisfy low >= recommend >= critical')
   })
   it('names keys the configuration does not define, and where the values of older keys live now', () => {
     const raw = minimal({ repository: 'acme/widgets', repositoryPath: '/srv/widgets', blockedCommands: [], author: { name: 'Alice' }, extra: 1 })

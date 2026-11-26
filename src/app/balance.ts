@@ -1,13 +1,14 @@
-/** Read-only balance monitoring for the provider the main Session runs on, with threshold, cooldown and health reporting. */
+/** Read-only balance monitoring for the provider the main Session runs on, with severity levels, cooldown and health reporting. */
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import { APP_IDENTITY } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { z } from 'zod'
+import type { BalanceConfig, BalanceLadder } from '../deployment.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import type { Settings } from '../policy.ts'
 import { health } from '../sources/host.ts'
-import type { BalanceView, BalanceWalletView } from './balance-view.ts'
+import type { BalanceLevel, BalanceView, BalanceWalletView } from './balance-view.ts'
 import type { Sessions } from './sessions.ts'
 
 /** The official DeepSeek API-key balance endpoint, the only route whose exact remaining balance this monitor reads. */
@@ -15,27 +16,11 @@ export const BALANCE_ENDPOINT = 'https://api.deepseek.com/user/balance'
 /** Where a person replenishes a DeepSeek API account; the warning names it instead of buying anything itself. */
 export const TOP_UP_URL = 'https://platform.deepseek.com/top_up'
 
-/** Budget, poll interval and cooldown of the read-only balance check. */
-export interface BalanceConfig {
-  /** Whether the check runs at all; off leaves the panel and health quiet. */
-  enabled: boolean
-  /** Minutes between checks after the startup check. */
-  intervalMinutes: number
-  /** Minutes before a still-low balance is announced again. */
-  cooldownMinutes: number
-  /** Read-only balance endpoint. Change it only for an official proxy of the same API. */
-  endpoint: string
-  /** Credential reference resolved through DSH's credential service for the API-key route. */
-  apiKeyEnv: string
-  /** Absolute low-balance threshold per currency; a currency without an entry is not checked. */
-  thresholds: Record<string, number>
-}
-
 /** The dependency seam of {@link BalanceMonitor}; `context` supplies the provider selection, credentials and account services. */
 export interface BalanceDeps {
   /** DSH context, read through `get` so the monitor works in a minimal profile without optional services. */
   context: Context
-  /** Thresholds and timing. Read once when the plugin starts. */
+  /** Ladders, interval and cooldown. Read once when the plugin starts. */
   config: BalanceConfig
   /** Main Session id whose current model selection names the provider to check. */
   masterId: string
@@ -45,7 +30,7 @@ export interface BalanceDeps {
   sessions: Pick<Sessions, 'notify'>
   /** Health entry this monitor owns and writes. */
   health: HealthEntry
-  /** Lifetime signal; aborting it cancels an in-flight check. */
+  /** Lifetime signal; aborting it cancels an in-flight read. */
   lifetime: AbortSignal
   /** Clock override for tests; defaults to `Date.now`. */
   now?: () => number
@@ -77,13 +62,33 @@ interface AccountLike { getBalance(client: { version: string; locale: string; ti
 /** The parts of DSH's default-model service this monitor reads; absent in a minimal profile. */
 interface DefaultModelLike { currentSelection(): { provider: string; model: string } }
 
+const LEVEL_RANK: Readonly<Record<BalanceLevel, number>> = { low: 1, recommend: 2, critical: 3 }
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error)
+
+/** The highest severity any wallet crossed, or `undefined` when every wallet is above its low threshold. */
+function highestLevel(wallets: readonly BalanceWalletView[]): BalanceLevel | undefined {
+  let highest: BalanceLevel | undefined
+  for (const wallet of wallets) {
+    if (wallet.level === 'ok') continue
+    if (highest === undefined || LEVEL_RANK[wallet.level] > LEVEL_RANK[highest]) highest = wallet.level
+  }
+  return highest
+}
+
+/** The level one amount crossed and that level's threshold; above the low threshold the first warning threshold is kept. */
+function crossedLevel(remaining: number, ladder: BalanceLadder): { level: 'ok' | BalanceLevel; threshold: number } {
+  if (remaining <= ladder.critical) return { level: 'critical', threshold: ladder.critical }
+  if (remaining <= ladder.recommend) return { level: 'recommend', threshold: ladder.recommend }
+  if (remaining <= ladder.low) return { level: 'low', threshold: ladder.low }
+  return { level: 'ok', threshold: ladder.low }
+}
 
 /**
  * Checks the balance of the provider the main Session runs on at startup and on a timer, without a model call.
  * It reads the official DeepSeek API-key endpoint or the signed-in Platform wallet through DSH's account service. A low
- * balance becomes the owned `balance` health entry, a durable main-Session notice at most once per cooldown, and the panel's
- * warning banner. It never logs or exposes the credential, and it does not present a token-usage estimate as a balance.
+ * balance becomes the owned `balance` health entry, a durable main-Session notice, and the panel's warning banner. Each
+ * currency's low / top-up-recommended / critical ladder decides the severity. It never logs or exposes the credential,
+ * and it does not present a token-usage estimate as a balance.
  */
 export class BalanceMonitor {
   private state: BalanceView = { status: 'checking', wallets: [] }
@@ -91,8 +96,10 @@ export class BalanceMonitor {
   private inflight: Promise<void> | undefined
   private stopped = false
   private started = false
-  /** Creation time of the last announcement, or `undefined` once a reading recovered above threshold. */
+  /** Creation time of the last announcement, or `undefined` once a reading recovered above the low threshold. */
   private lastNotifiedAt: number | undefined
+  /** Severity of the last announcement, so an escalation bypasses the same-level cooldown. */
+  private lastNotifiedLevel: BalanceLevel | undefined
   private readonly now: () => number
   private readonly read: typeof fetch
 
@@ -194,25 +201,27 @@ export class BalanceMonitor {
     const wallets: BalanceWalletView[] = []
     const unknown: string[] = []
     for (const info of parsed.data.balance_infos ?? []) {
-      const threshold = this.deps.config.thresholds[info.currency]
-      if (threshold === undefined) { unknown.push(info.currency); continue }
+      const ladder = this.deps.config.thresholds[info.currency]
+      if (ladder === undefined) { unknown.push(info.currency); continue }
       const remaining = Number(info.total_balance)
       if (!Number.isFinite(remaining)) return this.fail(selection, attemptedAt, `The balance endpoint returned an invalid amount for ${info.currency}.`)
-      wallets.push({ currency: info.currency, remaining: info.total_balance, threshold: threshold.toFixed(2), low: remaining <= threshold })
+      const crossed = crossedLevel(remaining, ladder)
+      wallets.push({ currency: info.currency, remaining: info.total_balance, threshold: crossed.threshold.toFixed(2), level: crossed.level })
     }
     const unavailable = parsed.data.is_available === false
     if (unavailable && !wallets.length) {
-      this.setView({ status: 'low', ...selection, source: 'api-key', checkedAt: attemptedAt, attemptedAt, wallets: [],
+      this.setView({ status: 'low', level: 'critical', ...selection, source: 'api-key', checkedAt: attemptedAt, attemptedAt, wallets: [],
         detail: 'The provider reports the account has no available balance.' })
       return
     }
     if (!wallets.length) {
-      return this.unconfigured(selection, attemptedAt,
-        `No threshold is configured for the balance currencies: ${unknown.join(', ') || 'none'}.`)
+      return this.unconfigured(selection, attemptedAt, unknown.length
+        ? `No thresholds are configured for the balance currencies: ${unknown.join(', ')}. Add balance.thresholds.<currency> to enable warnings.`
+        : 'The balance endpoint returned no balance information.')
     }
-    const low = unavailable || wallets.some(wallet => wallet.low)
-    this.setView({ status: low ? 'low' : 'ok', ...selection, source: 'api-key', checkedAt: attemptedAt, attemptedAt, wallets,
-      ...unknown.length ? { detail: `No threshold is configured for ${unknown.join(', ')}; those wallets are not checked.` } : {} })
+    const level = unavailable ? 'critical' : highestLevel(wallets)
+    this.setView({ status: level === undefined ? 'ok' : 'low', ...level === undefined ? {} : { level }, ...selection, source: 'api-key',
+      checkedAt: attemptedAt, attemptedAt, wallets, ...unknown.length ? { detail: `No thresholds are configured for ${unknown.join(', ')}; those wallets are not checked.` } : {} })
   }
 
   /** Read the signed-in Platform wallet, keeping recharge and bonus balances distinct on the wire and summed for the warning. */
@@ -234,16 +243,20 @@ export class BalanceMonitor {
     const wallets: BalanceWalletView[] = []
     const unknown: string[] = []
     for (const [currency, total] of totals) {
-      const threshold = this.deps.config.thresholds[currency]
-      if (threshold === undefined) { unknown.push(currency); continue }
+      const ladder = this.deps.config.thresholds[currency]
+      if (ladder === undefined) { unknown.push(currency); continue }
       if (!Number.isFinite(total)) return this.fail(selection, attemptedAt, `The account returned an invalid amount for ${currency}.`)
-      wallets.push({ currency, remaining: total.toFixed(2), threshold: threshold.toFixed(2), low: total <= threshold })
+      const crossed = crossedLevel(total, ladder)
+      wallets.push({ currency, remaining: total.toFixed(2), threshold: crossed.threshold.toFixed(2), level: crossed.level })
     }
     if (!wallets.length) {
-      return this.unconfigured(selection, attemptedAt, `No threshold is configured for the account currencies: ${unknown.join(', ') || 'none'}.`)
+      return this.unconfigured(selection, attemptedAt, unknown.length
+        ? `No thresholds are configured for the account currencies: ${unknown.join(', ')}. Add balance.thresholds.<currency> to enable warnings.`
+        : 'The account returned no wallet balance.')
     }
-    this.setView({ status: wallets.some(wallet => wallet.low) ? 'low' : 'ok', ...selection, source: 'account', checkedAt: attemptedAt,
-      attemptedAt, wallets, ...unknown.length ? { detail: `No threshold is configured for ${unknown.join(', ')}; those wallets are not checked.` } : {} })
+    const level = highestLevel(wallets)
+    this.setView({ status: level === undefined ? 'ok' : 'low', ...level === undefined ? {} : { level }, ...selection, source: 'account',
+      checkedAt: attemptedAt, attemptedAt, wallets, ...unknown.length ? { detail: `No thresholds are configured for ${unknown.join(', ')}; those wallets are not checked.` } : {} })
   }
 
   private unconfigured(selection: { provider: string; model: string }, attemptedAt: string, detail: string): void {
@@ -253,45 +266,53 @@ export class BalanceMonitor {
   /** Keep a previous low reading visible when a later check fails, so a transient network error cannot hide a known low balance. */
   private fail(selection: { provider: string; model: string }, attemptedAt: string, detail: string): void {
     const previous = this.state
-    if (previous.status === 'low' && previous.wallets.some(wallet => wallet.low)) {
+    if (previous.status === 'low') {
       this.setView({ ...previous, attemptedAt, detail: `${detail} The last successful check still applies.` })
       return
     }
     this.setView({ status: 'error', ...selection, attemptedAt, wallets: [], detail })
   }
 
-  /** Publish a reading, update the owned health entry, and announce a low balance at most once per cooldown. */
+  /** Publish a reading, update the owned health entry, and announce a low balance at most once per cooldown per severity. */
   private setView(view: BalanceView): void {
     this.state = view
     if (view.status === 'low') {
-      this.deps.health.set({ ...health('error', 'balanceLow', {
-        wallets: view.wallets.filter(wallet => wallet.low).map(wallet => `${wallet.currency} ${wallet.remaining} (threshold ${wallet.threshold})`).join('; ')
-          || view.detail || 'no available balance',
+      const level = view.level ?? 'low'
+      const code = level === 'critical' ? 'balanceCritical' : level === 'recommend' ? 'balanceRecommend' : 'balanceLow'
+      this.deps.health.set({ ...health('error', code, {
+        wallets: view.wallets.filter(wallet => wallet.level !== 'ok').map(wallet => `${wallet.currency} ${wallet.remaining} remaining (threshold ${wallet.threshold})`).join('; ')
+          || 'no available balance',
         provider: view.provider ?? 'the active provider',
         checkedAt: view.checkedAt ?? view.attemptedAt ?? '',
       }), at: view.checkedAt ?? view.attemptedAt })
-      this.announce(view)
+      this.announce(view, level)
       return
     }
-    if (view.status === 'ok') this.lastNotifiedAt = undefined
-    this.deps.health.set({ state: 'ready', detail: view.detail ?? 'Balance is above the warning threshold', at: view.attemptedAt })
+    this.lastNotifiedAt = undefined
+    this.lastNotifiedLevel = undefined
+    this.deps.health.set({ state: 'ready', detail: view.detail ?? 'Balance is above the low warning threshold', at: view.attemptedAt })
   }
 
-  /** Enqueue one durable main-Session notice per cooldown while the reading stays low; no Channel messages are sent. */
-  private announce(view: BalanceView): void {
+  /** Enqueue one durable main-Session notice per cooldown; a more severe level is announced immediately instead of waiting. */
+  private announce(view: BalanceView, level: BalanceLevel): void {
     const now = this.now()
     const cooldown = Math.max(1, this.deps.config.cooldownMinutes) * 60_000
-    if (this.lastNotifiedAt !== undefined && now - this.lastNotifiedAt < cooldown) return
+    const escalated = this.lastNotifiedLevel !== undefined && LEVEL_RANK[level] > LEVEL_RANK[this.lastNotifiedLevel]
+    if (!escalated && this.lastNotifiedAt !== undefined && now - this.lastNotifiedAt < cooldown) return
     this.lastNotifiedAt = now
-    const low = view.wallets.filter(wallet => wallet.low)
-    const summary = low.length
-      ? `API balance low for ${view.provider}: ${low.map(wallet => `${wallet.currency} ${wallet.remaining} remaining (threshold ${wallet.threshold})`).join(', ')}; replenish the account`
-      : `API balance low for ${view.provider}: ${view.detail ?? 'the provider reports no available balance'}; replenish the account`
+    this.lastNotifiedLevel = level
+    const low = view.wallets.filter(wallet => wallet.level !== 'ok')
+    const wallets = low.map(wallet => `${wallet.currency} ${wallet.remaining} (threshold ${wallet.threshold})`).join(', ')
+    const action = level === 'critical' ? 'API balance is critical; top up the account now.'
+      : level === 'recommend' ? 'API balance is low; top up the account soon.'
+      : 'API balance is low; plan to top up the account.'
+    const title = level === 'critical' ? 'API balance critical' : level === 'recommend' ? 'API balance low (top-up recommended)' : 'API balance low'
+    const summary = `${title} for ${view.provider}: ${wallets || 'no available balance'}; ${action}`
     this.deps.sessions.notify('balance', {
-      balance_low: { provider: view.provider, model: view.model, source: view.source, checked_at: view.checkedAt,
-        ...low.length ? { wallets: low.map(({ currency, remaining, threshold }) => ({ currency, remaining, threshold })) } : {},
+      balance_low: { level, provider: view.provider, model: view.model, source: view.source, checked_at: view.checkedAt,
+        ...low.length ? { wallets: low.map(({ currency, remaining, threshold, level: walletLevel }) => ({ currency, remaining, threshold, level: walletLevel })) } : {},
         ...view.detail ? { detail: view.detail } : {} },
-      action: 'API funds are running low; replenish the account.',
+      action,
       top_up: TOP_UP_URL,
     }, summary)
     this.deps.context.logger.warn('dsh-superagent: %s', summary)

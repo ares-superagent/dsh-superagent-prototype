@@ -94,7 +94,7 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | --- | --- | --- |
 | `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
-| `balance` | no | Read-only low-balance warnings: whether to run, the interval and cooldown in minutes, the credential reference and the absolute thresholds per currency |
+| `balance` | no | Read-only low-balance warnings: whether to run, the interval and cooldown in minutes, the credential reference and the three severity levels per currency |
 
 After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
 
@@ -105,13 +105,13 @@ dsh-superagent checks the balance of the provider the main Session runs on, at s
 - For the DeepSeek API-key route (`deepseek-official`), the official `GET https://api.deepseek.com/user/balance` endpoint with the credential named by `balance.apiKeyEnv` (default `DEEPSEEK_API_KEY`), resolved through DeepSeek Harness's credential service. The response's `total_balance` is the exact remaining API balance, including granted and topped-up credit.
 - For the signed-in Platform route (`deepseek-account`), the harness's read-only account service, which returns the recharge and bonus wallets. The monitor sums them per currency for the warning; this is the Platform wallet balance, not a token estimate.
 
-The defaults warn at **USD 5** and **CNY 20**, and check every **30 minutes**. Each currency is compared with its own absolute threshold; a currency without a threshold is not checked. The DeepSeek endpoint exposes no budget or quota total, so there is no percentage threshold: a percentage of an operator-chosen budget would be an estimate, not the provider's remaining quota. Nothing here estimates token spend or treats token usage as a balance.
+The USD severity ladder defaults to **$2 low (plan a top-up)**, **$1 top-up recommended**, and **$0.50 critical**. Checks run every **30 minutes**. A still-low balance of the same severity is announced at most every **6 hours**, while a more severe level is announced immediately, so a critical balance is not held back by the cooldown. There is **no CNY default**: CNY is checked only when a CNY ladder is explicitly configured, and a currency without a ladder is not checked. The DeepSeek endpoint exposes no budget or quota total, so there is no percentage threshold: a percentage of an operator-chosen budget would be an estimate, not the provider's remaining quota. Nothing here estimates token spend or treats token usage as a balance.
 
 A low balance produces:
 
-- the panel's warning banner, naming the provider, the exact remaining amount, the threshold, the check time and the action;
-- the owned `balance` health entry, so `scripts/dsh-superagent status` exits 2 and the hourly check tells the operator;
-- one durable main-Session notice per cooldown (default 6 hours), so a still-low balance is not announced repeatedly. The banner stays visible until the balance recovers.
+- the panel's warning banner, naming the severity, the provider, the exact remaining amount, the threshold, the check time and the action;
+- the owned `balance` health entry with the matching severity code, so `scripts/dsh-superagent status` exits 2 and the hourly check tells the operator;
+- one durable main-Session notice per severity per cooldown. An escalation notifies immediately; the banner stays visible until the balance recovers.
 
 To change the settings, add the `balance` block to the `dsh-superagent` entry in the profile's `cordis.patch.yml` and restart dsh-superagent:
 
@@ -123,12 +123,16 @@ To change the settings, add the `balance` block to the `dsh-superagent` entry in
       enabled: true
       intervalMinutes: 30
       cooldownMinutes: 360
-      thresholds: { USD: 5, CNY: 20 }
+      thresholds:
+        USD: { low: 2, recommend: 1, critical: 0.5 }
+        # CNY: { low: 20, recommend: 10, critical: 5 }  # only if the account is in CNY
 ```
 
-`endpoint` and `apiKeyEnv` are for an official proxy or a differently named credential. The credential value is only sent in the request's `Authorization` header; it is never logged, stored in the database, or shown in the panel. The check makes no model request and spends no tokens. If the main Session runs on a provider without a known read-only balance endpoint, or no credential is configured, no warning is produced and `GET state` reports why in `balance`.
+The defaults above are the approved USD ladder. A partial USD override keeps the other USD defaults; a CNY ladder must set all three levels because no CNY values are invented. The normalizer refuses a ladder whose `low` is below its `recommend`, or whose `recommend` is below its `critical`.
 
-The check runs even while setup waits: a low balance does not depend on the repository or the Sources. If setup has not resolved yet, the panel still shows the warning banner.
+`endpoint` and `apiKeyEnv` are for an official proxy or a differently named credential. The credential value is only sent in the request's `Authorization` header; it is never logged, stored in the database, or shown in the panel. The check makes no model request and spends no tokens. If the main Session runs on a provider without a known read-only balance endpoint, no credential is configured, or the account currency has no configured ladder, no warning is produced and `GET state` reports why in `balance`. A CNY-only account therefore needs an explicit CNY ladder before it warns.
+
+The check runs even while setup waits: a low balance does not depend on the repository or the Sources. If setup has not resolved yet, the panel still shows the warning banner. The values become active when the deployment starts this code; in the currently running service they are not active until it is rebuilt and restarted with the merged change.
 
 ## Start and stop
 
