@@ -314,6 +314,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/core/memory.ts` | `MemoryRepositories`: the Store's repositories in memory, in the Store's order and with its nested rollback, for domain tests |
 | `src/core/index.ts` | The core's exports |
 | `src/app/runtime.ts` | The Runtime, the composition root, with its start and stop |
+| `src/app/balance.ts` | `BalanceMonitor`: the read-only provider balance check, its low / top-up-recommended / critical ladder, escalation-aware cooldown, and the `balance` health entry and main-Session notice it produces |
+| `src/app/balance-view.ts` | `BalanceView` and `BalanceWalletView`, the balance state the panel renders; imported by types only |
 | `src/app/setup.ts` | Setup, and `setupChanged`, whether a save changes a field setup reads |
 | `src/app/passes.ts` | Passes, the pass scheduler |
 | `src/app/outbox.ts` | The Outbox: the Engine's `Outbox` port, the receipts and the `reply` effects that send them |
@@ -421,6 +423,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/queue.spec.ts` | The Runtime's work through the effect queue, and what earlier versions stored |
 | `tests/followups.spec.ts` | A person's follow-up on a Ticket's Thread: its notice to the main Session, the tools that act on it, what a burst costs; a worker's hand-back and context follow, and the main Session's note |
 | `tests/health.spec.ts` | One health entry per part, each cleared by its own next success |
+| `tests/balance.spec.ts` | The balance monitor: the three-level ladder, escalation and cooldown, provider selection, API-key and account reads, explicit CNY ladders, and failures that keep or clear a warning |
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
