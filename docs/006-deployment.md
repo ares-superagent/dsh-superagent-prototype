@@ -125,7 +125,7 @@ To change the settings, add the `balance` block to the `dsh-superagent` entry in
       cooldownMinutes: 360
       thresholds:
         USD: { low: 2, recommend: 1, critical: 0.5 }
-        # CNY: { low: 20, recommend: 10, critical: 5 }  # only if the account is in CNY
+        # CNY: { low: <amount>, recommend: <amount>, critical: <amount> }  # only if the account is in CNY
 ```
 
 The defaults above are the approved USD ladder. A partial USD override keeps the other USD defaults; a CNY ladder must set all three levels because no CNY values are invented. The normalizer refuses a ladder whose `low` is below its `recommend`, or whose `recommend` is below its `critical`.
