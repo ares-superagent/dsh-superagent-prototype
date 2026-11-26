@@ -38,6 +38,7 @@ import { HealthBoard } from '../infra/health.ts'
 import { Outbox } from './outbox.ts'
 import { BalanceMonitor } from './balance.ts'
 import { Passes } from './passes.ts'
+import { Progress } from './progress.ts'
 import { Setup } from './setup.ts'
 import { feishuSettings } from '../sources/feishu.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
@@ -73,6 +74,7 @@ export class Runtime extends Service implements SourceHost {
   readonly balance: BalanceMonitor
   readonly engine: Engine
   readonly passes: Passes
+  readonly progress: Progress
   readonly ready: Promise<void>
   private readonly board = new HealthBoard()
   private readonly runtimeHealth = this.board.claim('runtime', { state: 'starting', detail: '' })
@@ -156,6 +158,13 @@ export class Runtime extends Service implements SourceHost {
             for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)
           }
         } })
+      // The ten-minute progress cadence publishes from stored state and worker Session events; it never calls a model.
+      this.progress = new Progress({ tickets: () => store.tickets.open(),
+        publish: (ticketId, update) => { engine.publishProgress(ticketId, update) },
+        activity: ticketId => this.executor.activity(ticketId),
+        pending: ticketId => store.receipts.waiting().some(receipt => receipt.kind === 'progress' && receipt.ticketId === ticketId),
+        now, paused: () => this.paused(), closing: () => this.closing(),
+        health: board.claim('progress', { state: 'ready', detail: 'Progress updates are being published', at: now() }) })
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
       const evals = board.claim('evals', { state: 'ready', detail: 'No unavailable Eval in the last hour' })
       const evaluateDue = () => { engine.evaluateDue(); evals.set(evalsHealth(store)) }
@@ -220,6 +229,7 @@ export class Runtime extends Service implements SourceHost {
     if (this.closing()) return
     this.executor.resume()
     this.passes.start()
+    this.progress.start()
     this.effects.start()
     this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
   }
@@ -235,7 +245,7 @@ export class Runtime extends Service implements SourceHost {
   /** Idempotent stop; concurrent or repeated calls share the same shutdown promise. */
   stop(): Promise<void> { return this.stopping ??= this.shutdown() }
   private async shutdown(): Promise<void> {
-    this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort(); this.balance.stop()
+    this.closingFlag = true; const passes = this.passes.stop(); this.progress.stop(); this.stopped.abort(); this.balance.stop()
     try {
       this.assessor.stop()
       const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]

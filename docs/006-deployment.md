@@ -277,6 +277,8 @@ From an allowed GitHub account, open an Issue or post a comment containing `@<ag
 
 A restart ends running Assignments and starts replacements with recovery notes. Team text and overridden prompt parts are retained; parts without overrides follow the new defaults. Review parts marked **Default updated** after upgrading.
 
+This version adds the runtime's ten-minute progress update to a Ticket's source conversation. The default Communication section and the `work` part describe it; a team that overrides either must add that text, or reset the override to follow the new default.
+
 A database migrated by a newer version cannot be opened by an older one. Rollback therefore requires the pre-upgrade backup. After upgrading DeepSeek Harness itself, restart the running instance so the panel loads matching artifacts.
 
 ### Agent presets

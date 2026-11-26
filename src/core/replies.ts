@@ -2,18 +2,25 @@
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
 import { latestAssignment, liveTicket, ticketOutcome } from './model.ts'
-import type { ChannelRef, Ticket, Trigger } from './model.ts'
+import type { ChannelRef, ProgressPhase, Ticket, Trigger } from './model.ts'
 import type { ReplyStatus } from './ports.ts'
 import { EnginePart } from './part.ts'
+
+/** The line every message posted on GitHub must begin with, which a runtime-written progress update adds itself. */
+const GITHUB_NOTE = 'This is by an automated agent, not a human.'
 
 /**
  * A message for a Channel, by purpose: an Executor's acknowledgement of a person's request it works on, the answer to a
  * person's question once the worker reported it, the result of a ticket that is `ready`, `completed`, `merged`, or `dropped`,
- * or the ticket's current `question` for a person (`attention`). When `ticketId` is omitted, the ticket that `triggerId` reached is used.
+ * the ticket's current `question` for a person (`attention`), or a runtime progress update (`progress`) from the cadence in
+ * `src/app/progress.ts`. When `ticketId` is omitted, the ticket that `triggerId` reached is used.
  */
 export type ReplyRequest =
   | { purpose: 'acknowledgement'; ticketId: string; triggerId: string; text: string }
   | { purpose: 'answer' | 'result' | 'attention'; ticketId?: string; triggerId?: string; question?: string; text: string }
+  | ProgressRequest
+/** A runtime progress update: its text, when it is queued, which due time keeps it idempotent, and what it says about the worker. */
+export interface ProgressRequest { purpose: 'progress'; ticketId: string; text: string; at: string; due: string; phase: ProgressPhase }
 /** A queued message: its id, whether it went out, and whether an earlier request had queued it already. */
 export interface Reply { id: string; status: ReplyStatus; reused: boolean }
 
@@ -34,7 +41,37 @@ export class Replies extends EnginePart {
    * that is not ready, completed, merged, or dropped.
    */
   reply(request: ReplyRequest): Reply {
-    return request.purpose === 'acknowledgement' ? this.acknowledge(request) : this.answer(request)
+    return request.purpose === 'acknowledgement' ? this.acknowledge(request)
+      : request.purpose === 'progress' ? this.progress(request) : this.answer(request)
+  }
+  /**
+   * Queue a progress update in the conversation the ticket started in, from the runtime's cadence: only while one of its
+   * Assignments runs, at most once for `due` (a deterministic id), and with the automated-agent line on GitHub. The
+   * Assignment records when it was published and what it said, so the next update is ten minutes later also after a restart.
+   * A ticket with no Channel, or one that ended or no longer runs an Assignment, is skipped silently, since the cadence is
+   * best effort and raced by a worker's own reports.
+   */
+  progress(request: ProgressRequest): Reply {
+    const ticket = this.require(request.ticketId)
+    // A queued assignment has no worker yet, but a person waiting on it deserves to hear that it is queued.
+    const assignment = liveTicket(ticket) ? latestAssignment(ticket) : undefined
+    if (!assignment || assignment.state === 'ended') return { id: key('progress', ticket.id, request.due), status: 'dropped', reused: true }
+    const id = key('progress', ticket.id, assignment.id, request.due)
+    const existing = this.options.outbox.status(id)
+    const channel = this.sourceChannel(ticket)
+    if (!channel) {
+      // Nothing to publish to, such as a ticket accepted from a Source without a Channel: remember the due time, so the cadence does not retry every minute.
+      assignment.progress = { at: request.at, phase: request.phase }
+      this.repo.tickets.save(ticket)
+      return { id, status: 'dropped', reused: existing !== undefined }
+    }
+    if (!existing) {
+      const text = channel.source === 'github' && !request.text.startsWith(GITHUB_NOTE) ? `${GITHUB_NOTE}\n\n${request.text}` : request.text
+      this.options.outbox.send({ id, channel, text, kind: 'progress', ticketId: ticket.id })
+    }
+    assignment.progress = { at: request.at, phase: request.phase }
+    this.repo.tickets.save(ticket)
+    return { id, status: this.options.outbox.status(id) ?? 'pending', reused: existing !== undefined }
   }
   /**
    * Queue the acknowledgement an accept carries where the message that started the ticket was written, if it has a Channel
@@ -61,7 +98,7 @@ export class Replies extends EnginePart {
     this.takeUp(ticket.id, trigger.id)
     return { id, status: this.options.outbox.status(id) ?? 'pending', reused: existing !== undefined }
   }
-  private answer(request: Exclude<ReplyRequest, { purpose: 'acknowledgement' }>): Reply {
+  private answer(request: Exclude<ReplyRequest, { purpose: 'acknowledgement' } | { purpose: 'progress' }>): Reply {
     const trigger = request.triggerId ? this.repo.triggers.get(request.triggerId) : undefined
     if (request.triggerId && !trigger) throw new UserError('unknownTrigger')
     const ticket = request.ticketId ? this.require(request.ticketId)

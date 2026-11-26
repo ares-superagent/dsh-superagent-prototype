@@ -16,6 +16,7 @@ import { executionRoot, type Variable } from '../app/execution-environment.ts'
 import type { Sessions } from '../app/sessions.ts'
 import { WorktreeNameSchema } from '../app/assessment.ts'
 import { resultRelay } from '../app/notices.ts'
+import type { ProgressActivity } from '../app/progress.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { cancelled, collectJob, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
 
@@ -224,6 +225,13 @@ export class DshExecutor implements Executor {
   private readonly personal = new Map<string, string>()
   /** The timers of workers that go on after a passing failure, which dispose clears. */
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
+  /**
+   * What each worker Session last did, by ticket, for the progress cadence: the last tool call, model step, or background
+   * work. It is session activity, not a claim that the work goes on, and an entry is dropped when its ticket's worker stops.
+   */
+  private readonly lastActivity = new Map<string, ProgressActivity>()
+  /** When the look at a ticket's background work began, so a long wait reads as waiting on that work. */
+  private readonly settlingSince = new Map<string, string>()
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
   constructor(private readonly host: ExecutorHost) {
     this.slots = new WorkerSlots(() => host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => ticket.id),
@@ -356,6 +364,7 @@ export class DshExecutor implements Executor {
    */
   stop(ticket: Ticket, assignment: Assignment, reason: string): void {
     this.transient.delete(assignment.id); this.transient.delete(`launch:${assignment.id}`)
+    this.lastActivity.delete(ticket.id); this.settlingSince.delete(ticket.id)
     const report = assignment.report
     const busy = !!assignment.deliveredAt && !!report && assignment.deliveredAt >= report.at
     const ownTurn = (report?.state === 'ready' || report?.state === 'dropped') && !busy
@@ -399,6 +408,30 @@ export class DshExecutor implements Executor {
       await Promise.allSettled(running.map(agent => agent.whenIdle()))
     }
     await until(stop(), undefined, SHUTDOWN_STOP_MS)
+  }
+  /**
+   * What the ticket's worker Session last did, for the progress cadence: the last tool call, model step, or background work.
+   * Background jobs and subagents count as tool activity while they run after the worker's turn ended, so the cadence can tell
+   * a long-running command from a hung model call.
+   */
+  activity(ticketId: string): ProgressActivity | undefined {
+    const last = this.lastActivity.get(ticketId)
+    if (this.settling.has(ticketId)) return { at: this.settlingSince.get(ticketId) ?? last?.at ?? now(), kind: 'background' }
+    return last
+  }
+  /** Records what a worker Session just did, for the progress cadence; dropped with its ticket's turn. */
+  private markActivity(ticketId: string, kind: ProgressActivity['kind'], detail?: string): void {
+    this.lastActivity.set(ticketId, { at: now(), kind, ...detail ? { detail } : {} })
+  }
+  /** Translates the Session events that show what a worker is doing into `lastActivity` for the progress cadence. */
+  private trackSession(ticketId: string, event: { type: string; data?: unknown }): void {
+    if (this.host.closing()) return
+    if (event.type === 'tool/call') {
+      const name = (event.data as { name?: unknown } | undefined)?.name
+      this.markActivity(ticketId, 'tool', typeof name === 'string' ? name : undefined)
+    } else if (event.type === 'tool/result' || event.type === 'assistant/message' || event.type === 'step/start' || event.type === 'turn/start') {
+      this.markActivity(ticketId, 'model')
+    }
   }
   /** Number of open tickets whose worker holds a worker slot: its turn runs, or its shell jobs or subagents still run after its turn ended. */
   activeCount(): number { return this.host.store.tickets.open().filter(ticket => this.running(ticket)).length }
@@ -466,6 +499,7 @@ export class DshExecutor implements Executor {
     await this.host.sessions.prompt(sessionId, requestId, text, 'queue',
       () => { if (!current()) throw new Error('Launch authorization changed before worker delivery') },
       () => { this.host.engine.assignmentStarted(ticket.id, assignment.id) })
+    this.markActivity(ticket.id, 'model')
     this.host.engine.assignmentStarted(ticket.id, assignment.id)
   }
   /** Returns the stored ticket for `agent` when it is a worker session, or undefined otherwise. */
@@ -477,8 +511,13 @@ export class DshExecutor implements Executor {
   install(): void {
     const ctx = this.host.context
     this.disposers.push(ctx.on('agent/status', ({ agent, status }) => {
+      const ticketId = ticketOfSession(agent.id)
       // A turn that starts ends the look at its worker's background work; the turn's own idle looks afresh.
-      if (status === 'running') { this.settling.get(ticketOfSession(agent.id) ?? '')?.abort(); return }
+      if (status === 'running') {
+        this.settling.get(ticketId ?? '')?.abort()
+        if (ticketId !== undefined) this.markActivity(ticketId, 'model')
+        return
+      }
       // The turn a stop of the worker's subagents woke and cancelled is no turn of the worker's.
       if (status !== 'idle' || cancelled.delete(agent) || this.host.closing()) return
       const ticket = this.ticketOf(agent)
@@ -494,6 +533,7 @@ export class DshExecutor implements Executor {
     // history: a step that claimed it may be cancelled or fail before, which drops it.
     this.disposers.push(ctx.on('session/event', (session, event) => {
       const ticketId = ticketOfSession(session.id)
+      if (ticketId !== undefined) this.trackSession(ticketId, event)
       if (event.type !== 'user/message' || ticketId === undefined || event.data.source.kind !== 'dsh-superagent' || this.host.closing()) return
       const message = event.data
       void this.background(Promise.resolve().then(() => {
@@ -515,6 +555,7 @@ export class DshExecutor implements Executor {
     for (const dispose of this.disposers.splice(0)) dispose()
     for (const timer of this.timers) clearTimeout(timer)
     this.timers.clear()
+    this.lastActivity.clear(); this.settlingSince.clear()
   }
   /**
    * Reconciles running and pending assignments across open tickets after a host restart: notifies Engine of interrupted
@@ -631,12 +672,13 @@ export class DshExecutor implements Executor {
     this.settling.get(ticket.id)?.abort()
     const look = new AbortController(), limit = new AbortController()
     this.settling.set(ticket.id, look)
+    this.settlingSince.set(ticket.id, now())
     const timer = setTimeout(() => { limit.abort() }, BACKGROUND_LIMIT_MS)
     timer.unref?.()
     let quiet: boolean
     const left = this.left.get(ticket.id)?.jobs
     try { quiet = await untilQuiet(this.host.context, agent, AbortSignal.any([this.host.lifetime, look.signal, limit.signal]), left) }
-    finally { clearTimeout(timer); if (this.settling.get(ticket.id) === look) this.settling.delete(ticket.id) }
+    finally { clearTimeout(timer); if (this.settling.get(ticket.id) === look) { this.settling.delete(ticket.id); this.settlingSince.delete(ticket.id) } }
     const current = live()
     if (this.host.closing() || look.signal.aborted || (!quiet && !limit.signal.aborted) || !current || this.resuming.has(idle.id)) return
     if (quiet) this.host.engine.turnEnded(ticket.id, idle.id)

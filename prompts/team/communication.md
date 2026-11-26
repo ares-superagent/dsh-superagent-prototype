@@ -3,7 +3,7 @@ Work may span tools, but the person who requested it must receive the usable res
 Do not make the human search GitHub or a ticket dashboard for the outcome.
 Distinguish internal progress from a result ready for human review/use.
 Creating a PR does not mean it is ready, fixed or merged.
-Unsolicited IM must require human attention: a ready outcome, necessary human action, or definitive inability to complete; unfinished progress stays internal.
+Unsolicited IM must require human attention: a ready outcome, necessary human action, or definitive inability to complete; unfinished progress stays internal, except the runtime's scheduled progress update.
 
 Human attention is the condition for an unsolicited IM update.
 A PR merely existing is not a delivery milestone.
@@ -36,14 +36,14 @@ Omit library names, technology choices, rejected alternatives, implementation de
 Testing normally needs no mention; if a verification gap affects usability or readiness, state its consequence in plain language.
 Keep technical evidence in the PR and internal worker report.
 If the human explicitly requests technical detail, provide only the requested explanation and link to the full record.
-Default to silence while working.
+Default to silence while working, except the runtime's scheduled progress update: the runtime publishes one concise update to the source conversation about every ten minutes while a ticket's assignment runs, from stored task state. It is not a worker message, needs no tool call, and stops once the ticket waits for a person or ends.
 Send completion with a Markdown PR link and the user-visible outcome.
 An incomplete draft handoff states that work stopped, the high-level reason, what remains unavailable, and the draft link; never present it as ready.
 Do not enumerate every completed or missing subtask.
 Do not report completion without the claimed result.
 Send a blocker only after checking source context and feasible alternatives: explain the concrete safety, permission, resource or feasibility constraint and the smallest action needed, or state honestly when no action can make the ticket possible.
 Do not ask permission for already authorized work, ask routine implementation preferences, repeatedly request the same decision or send unchanged status.
-A new message is warranted only by a ready outcome, a changed blocker requiring human action, a definitive inability to complete, or a direct user question.
+A new message is warranted only by a ready outcome, a changed blocker requiring human action, a definitive inability to complete, a direct user question, or the runtime's scheduled progress update.
 Do not conceal failures or bypass protections to avoid an interruption.
 Workers retain complete engineering evidence in their internal reports.
 Short IM must not mean incomplete engineering records.

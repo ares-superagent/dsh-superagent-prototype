@@ -350,6 +350,24 @@ it('records worker reports, binds the task PR, ends the ticket on ready without 
   expect(notice ?? runtime.store.replyStatus(key('pr-terminal', '42', 'feishu', JSON.stringify({ chatId: CHAT, messageId: 'om_1' }), 'merged'))).toBeTruthy()
 })
 
+it('publishes a progress update from stored state after ten minutes, without another worker prompt', async () => {
+  const { ticket } = await acceptedTicket()
+  const sent = vi.spyOn(runtime.sources, 'send').mockResolvedValue('sent')
+  const prompts = deliveries.mock.calls.length
+  vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 11 * 60_000 })
+  try {
+    await runtime.progress.pump()
+    await runtime.sendReplies()
+  } finally { vi.useRealTimers() }
+  const updates = sent.mock.calls.map(([message]) => message).filter(message => message.kind === 'progress')
+  expect(updates).toHaveLength(1)
+  expect(updates[0]!.text).toContain('Completed:')
+  expect(updates[0]!.text).toContain('Now:')
+  expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.progress).toMatchObject({ phase: 'active' })
+  // The cadence reads stored state: it neither prompts the worker nor wakes the main Session.
+  expect(deliveries.mock.calls.length).toBe(prompts)
+})
+
 it('lists each ticket with the Threads it subscribes to, as their Sources describe them', async () => {
   const { sessionId, ticket } = await acceptedTicket()
   await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'pr open', pr_number: 42 })

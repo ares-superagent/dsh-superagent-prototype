@@ -214,6 +214,13 @@ export type AssignmentState = 'pending' | 'running' | 'ended'
  * ready (`ready`), a person must act to unblock or recover it (`blocked` or `failed`), or nothing is left to do (`dropped`).
  */
 export type ReportState = 'progress' | 'waiting' | 'ready' | 'blocked' | 'failed' | 'dropped'
+/**
+ * What the runtime's scheduled progress update last said about an Assignment: the worker is active, the Assignment waits
+ * for a worker slot (`queued`), or no activity was recorded for long enough to look stalled.
+ */
+export type ProgressPhase = 'active' | 'queued' | 'stalled'
+/** When the runtime last published a progress update for an Assignment, and what that update said. */
+export interface ProgressNote { at: string; phase: ProgressPhase }
 /** Binding between a ticket and one executor instance. */
 export interface Assignment {
   id: string
@@ -230,6 +237,11 @@ export interface Assignment {
    * into a step before, the worker read.
    */
   idleAt?: string
+  /**
+   * When the runtime last published a progress update for this Assignment, and whether it said the worker was active,
+   * queued for a slot, or stalled. It bounds the next update and lets a restart continue the cadence without repeating one.
+   */
+  progress?: ProgressNote
 }
 
 export type TicketInput =

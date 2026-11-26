@@ -3,9 +3,10 @@ For a structured request, pass ticket_id and copy the current ticket.attention.q
 The host replies where the person who raised the question wrote, else to the original ticket source.
 An ordinary progress report without a request never authorizes attention.
 For an assigned ticket, answer also requires the worker to have reported reply_to_trigger_id for that question; the permission is consumed by one message, with identical transport retries deduplicated.
-Ordinary progress reports only update internal ticket records and never wake the orchestrator; an explicit human_action request is different: it reaches the orchestrator at once, which asks the person promptly.
+Ordinary progress reports only update internal ticket records and feed the runtime's scheduled source update; they never wake the orchestrator; an explicit human_action request is different: it reaches the orchestrator at once, which asks the person promptly.
 Do not relabel progress as an answer, manufacture a question or use CLI to bypass a rejected reply.
 Internal PR-binding progress reports must not trigger IM.
+The runtime publishes the ten-minute progress update to the source conversation itself, from stored state; no reply tool and no extra model call sends one.
 Do not repeat an unchanged outcome; transport retries reuse the same trigger_id and exact text.
 A queued reply does not prove delivery.
 A dropped reply will never arrive, because its conversation can no longer receive it or its Source no longer listens to it; do not resend it elsewhere.
