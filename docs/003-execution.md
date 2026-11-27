@@ -54,6 +54,16 @@ Each update states what is complete, what runs now, the next action and any bloc
 
 Updates stop once the Ticket leaves `working`: a result, a question for a person, a blocker, a failed delivery or an idle worker is already reported by the Report itself. A GitHub update begins with the automated-agent line. The Assignment stores when the runtime last spoke and what it said, so a restart continues the cadence without a duplicate. The interval is fixed at ten minutes in the runtime; no settings or API token is involved.
 
+### Immediate alerts
+
+The same minute check sends an immediate alert to the Ticket's conversation, without waiting for the ten-minute interval, in three cases. Each is once per Assignment and needs no model call:
+
+- The launch is still queued one minute after acceptance. The alert names the missing worker slot and says that it starts when one frees.
+- A launched worker Session recorded no first action within a minute, such as no model step or tool call. The alert names that and suggests checking the worker's Session or retrying the Ticket.
+- A tool result failed for authentication, a missing credential or an access denial, classified from the error identity the Session recorded. The alert names the tool, gives a fixed reason and the smallest action a person must take; it never reproduces raw tool output, which may hold a secret. A later successful tool result clears the condition.
+
+The alert path does not change the Assignment's progress note or reset the ten-minute interval. A worker's own `blocked` Report remains the authoritative status and stops the cadence.
+
 ### Preparing a Ticket directory
 
 Before the first Assignment, if the Ticket directory does not exist, the prepare command runs once with `sh` in the execution root. It has ten minutes to finish. Without a prepare command, the worker starts in an empty directory.

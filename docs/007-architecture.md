@@ -38,7 +38,7 @@ Shutdown cancels turns, waits for passes, effects and agents, restores the proce
 | --- | --- | --- |
 | Setup | `src/app/setup.ts` | Resolves the repository and the accounts by probing their CLIs the way worker shells run them, writes and applies the workers' environment and command shims, and keeps the setup problems; Settings checks a changed account through it, and restarts through it, which runs setup again |
 | Passes | `src/app/passes.ts` | One pass at a time, every two seconds and whenever a command asks: the due effects, then `Engine.evaluateDue`; a Source's Trigger reaches the Engine through it |
-| Progress | `src/app/progress.ts` | The ten-minute progress cadence: once a minute it looks for an open Ticket in the `working` stage whose update is due, reads the Assignment, its latest Report and the worker Session's last activity from the Executor, and asks the Engine to publish one four-part update to the Ticket's source conversation; a queued or stalled state goes out once, and no model is called |
+| Progress | `src/app/progress.ts` | The ten-minute progress cadence and its immediate alerts: once a minute it looks for an open Ticket in the `working` stage, reads the Assignment, its latest Report and the worker Session's last activity and first action from the Executor, and asks the Engine to publish one four-part update to the Ticket's source conversation; a queued or stalled state goes out once. Before the interval it also queues one alert per Assignment when a launch stays queued a minute after acceptance, a launched Session records no first action, or a tool result failed for access or credentials; no model is called |
 | Outbox | `src/app/outbox.ts` | The Engine's `Outbox` port, and the only writer of the receipts: `send` keeps a message's receipt and queues its `reply` effect in one transaction, and the effect's handler sends it through `SourceRegistry.send`; a message waits while its Source is off, and is dropped when the conversation is gone or not listened to |
 | Notices | `src/app/notices.ts` | Converts domain events and worker activity into main-Session messages. `eventNotice` handles domain notices; `reportRelay` forwards questions immediately, keeps ordinary progress on its Ticket, and relays other reports; `followupRelay` names the Tickets that own a human follow-up. Relays arriving during a turn are delivered together at its next step through the DeepSeek Harness inbox |
 
@@ -362,6 +362,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
 | `src/infra/paths.ts` | The package's root, where packaged files are |
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
+| `src/infra/tool-failure.ts` | The deterministic classification of a worker tool failure that needs a person: an authentication, credential or permission error becomes a fixed reason and smallest action, never raw output |
 | `src/infra/health.ts` | The `HealthBoard`, every part's health entry, each claimed by its one writer |
 | `src/sources/kind.ts` | The `SourceKind` protocol |
 | `src/sources/registry.ts` | `SourceRegistry` |
@@ -421,7 +422,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/bundle-patch.spec.ts` | The bundle's patch, read as DeepSeek Harness reads it, and the agent preset of Executor Sessions it defines |
 | `tests/effects.spec.ts` | The effect queue: coalescing, limits, retries with backoff, health and shutdown |
 | `tests/passes.spec.ts` | Passes: one at a time, the ones asked for during a pass run as one after it, and the runtime health a failed pass reports |
-| `tests/progress.spec.ts` | The progress cadence: its first update and ten-minute interval, a worker report as completed work, completion, queued and stalled states, duplicate suppression, a restart, and the IM length limit |
+| `tests/progress.spec.ts` | The progress cadence: its first update and ten-minute interval, a worker report as completed work, completion, queued and stalled states, duplicate suppression, a restart, the IM length limit, and the immediate start and blocked alerts |
+| `tests/tool-failure.spec.ts` | The deterministic tool-failure classification: authentication and permission failures, routine failures left alone, and fixed words that never carry raw output |
 | `tests/outbox.spec.ts` | The Outbox on a running Runtime: messages wait while processing is paused or their Source is not installed |
 | `tests/cache.spec.ts` | `TextCache` |
 | `tests/queue.spec.ts` | The Runtime's work through the effect queue, and what earlier versions stored |

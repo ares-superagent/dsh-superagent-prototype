@@ -7,7 +7,7 @@ import type { EngineOptions } from './part.ts'
 import { Assignments, type WorkerReport } from './assignments.ts'
 import { Evals, type Outcome } from './evals.ts'
 import { Intake, type ReceiveResult } from './intake.ts'
-import { Replies, type ProgressRequest, type Reply, type ReplyRequest } from './replies.ts'
+import { Replies, type AlertRequest, type ProgressRequest, type Reply, type ReplyRequest } from './replies.ts'
 import { Tickets } from './tickets.ts'
 
 export type { EngineOptions } from './part.ts'
@@ -17,6 +17,8 @@ export type { ReceiveResult } from './intake.ts'
 export type { ProgressRequest, Reply, ReplyRequest } from './replies.ts'
 /** A progress update the runtime asks the Engine to publish: its text, when it is queued, its due time, and what it says. */
 export type ProgressUpdate = Omit<ProgressRequest, 'purpose' | 'ticketId'>
+/** An immediate runtime alert: its text and a deterministic key that keeps the same problem idempotent. */
+export type AlertUpdate = Omit<AlertRequest, 'purpose' | 'ticketId'>
 
 /**
  * Single transactional entry point for mutating Triggers, Threads, Decisions, Tickets, and Assignments.
@@ -142,6 +144,14 @@ export class Engine {
    */
   publishProgress(ticketId: string, update: ProgressUpdate): Reply {
     return this.repo.atomic(() => this.replies.progress({ purpose: 'progress', ticketId, ...update }))
+  }
+  /**
+   * Queue the runtime's immediate alert to the conversation a ticket started in, at most once per key and Assignment; used
+   * for a start that did not happen and a blocking tool failure, so a person learns of it before the next progress update.
+   * The progress cadence (`src/app/progress.ts`) is its only caller.
+   */
+  publishAlert(ticketId: string, alert: AlertUpdate): Reply {
+    return this.repo.atomic(() => this.replies.alert({ purpose: 'alert', ticketId, ...alert }))
   }
 
   // People, through the panel or the main Session

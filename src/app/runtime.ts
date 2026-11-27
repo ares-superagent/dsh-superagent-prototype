@@ -161,7 +161,10 @@ export class Runtime extends Service implements SourceHost {
       // The ten-minute progress cadence publishes from stored state and worker Session events; it never calls a model.
       this.progress = new Progress({ tickets: () => store.tickets.open(),
         publish: (ticketId, update) => { engine.publishProgress(ticketId, update) },
+        alert: (ticketId, key, text) => { engine.publishAlert(ticketId, { key, text }) },
         activity: ticketId => this.executor.activity(ticketId),
+        firstAction: ticketId => this.executor.firstAction(ticketId),
+        blocking: ticketId => this.executor.blocking(ticketId),
         pending: ticketId => store.receipts.waiting().some(receipt => receipt.kind === 'progress' && receipt.ticketId === ticketId),
         now, paused: () => this.paused(), closing: () => this.closing(),
         health: board.claim('progress', { state: 'ready', detail: 'Progress updates are being published', at: now() }) })
