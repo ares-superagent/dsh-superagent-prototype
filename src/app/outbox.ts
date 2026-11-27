@@ -26,7 +26,7 @@ export class Outbox implements OutboxPort {
   /** Record a message receipt and enqueue its delivery effect atomically; duplicate message IDs are ignored. */
   send(message: OutboundMessage): void {
     // Validate IM reply length here; acknowledgements are already validated when decided, and progress updates are capped by their cadence.
-    if ((message.kind === 'reply' || message.kind === 'progress') && message.channel.source === 'feishu') checkedImText(message.text)
+    if ((message.kind === 'reply' || message.kind === 'progress' || message.kind === 'alert') && message.channel.source === 'feishu') checkedImText(message.text)
     const { store, effects } = this.host
     store.atomic(() => { if (store.receipts.add(message)) effects.enqueue('reply', message.id, {}) })
   }

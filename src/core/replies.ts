@@ -13,14 +13,18 @@ const GITHUB_NOTE = 'This is by an automated agent, not a human.'
  * A message for a Channel, by purpose: an Executor's acknowledgement of a person's request it works on, the answer to a
  * person's question once the worker reported it, the result of a ticket that is `ready`, `completed`, `merged`, or `dropped`,
  * the ticket's current `question` for a person (`attention`), or a runtime progress update (`progress`) from the cadence in
- * `src/app/progress.ts`. When `ticketId` is omitted, the ticket that `triggerId` reached is used.
+ * `src/app/progress.ts`. A runtime `alert` reports a start that did not happen or a blocking tool failure without waiting for
+ * the cadence. When `ticketId` is omitted, the ticket that `triggerId` reached is used.
  */
 export type ReplyRequest =
   | { purpose: 'acknowledgement'; ticketId: string; triggerId: string; text: string }
   | { purpose: 'answer' | 'result' | 'attention'; ticketId?: string; triggerId?: string; question?: string; text: string }
   | ProgressRequest
+  | AlertRequest
 /** A runtime progress update: its text, when it is queued, which due time keeps it idempotent, and what it says about the worker. */
 export interface ProgressRequest { purpose: 'progress'; ticketId: string; text: string; at: string; due: string; phase: ProgressPhase }
+/** A runtime alert: its text and a deterministic key that keeps the same problem from being reported again for the Assignment. */
+export interface AlertRequest { purpose: 'alert'; ticketId: string; text: string; key: string }
 /** A queued message: its id, whether it went out, and whether an earlier request had queued it already. */
 export interface Reply { id: string; status: ReplyStatus; reused: boolean }
 
@@ -42,7 +46,8 @@ export class Replies extends EnginePart {
    */
   reply(request: ReplyRequest): Reply {
     return request.purpose === 'acknowledgement' ? this.acknowledge(request)
-      : request.purpose === 'progress' ? this.progress(request) : this.answer(request)
+      : request.purpose === 'progress' ? this.progress(request)
+      : request.purpose === 'alert' ? this.alert(request) : this.answer(request)
   }
   /**
    * Queue a progress update in the conversation the ticket started in, from the runtime's cadence: only while one of its
@@ -74,6 +79,25 @@ export class Replies extends EnginePart {
     return { id, status: this.options.outbox.status(id) ?? 'pending', reused: existing !== undefined }
   }
   /**
+   * Queue a runtime alert in the conversation the ticket started in: an immediate message about a start that did not happen
+   * or a tool failure that needs a person, without the cadence's ten-minute wait. The deterministic key keeps the same
+   * problem from being reported again for the Assignment; a ticket that ended or no longer runs one is skipped silently.
+   */
+  alert(request: AlertRequest): Reply {
+    const ticket = this.require(request.ticketId)
+    const assignment = liveTicket(ticket) ? latestAssignment(ticket) : undefined
+    if (!assignment || assignment.state === 'ended') return { id: key('alert', ticket.id, request.key), status: 'dropped', reused: true }
+    const id = key('alert', ticket.id, assignment.id, request.key)
+    const existing = this.options.outbox.status(id)
+    const channel = this.sourceChannel(ticket)
+    if (!channel) return { id, status: 'dropped', reused: existing !== undefined }
+    if (!existing) {
+      const text = channel.source === 'github' && !request.text.startsWith(GITHUB_NOTE) ? `${GITHUB_NOTE}\n\n${request.text}` : request.text
+      this.options.outbox.send({ id, channel, text, kind: 'alert', ticketId: ticket.id })
+    }
+    return { id, status: this.options.outbox.status(id) ?? 'pending', reused: existing !== undefined }
+  }
+  /**
    * Queue the acknowledgement an accept carries where the message that started the ticket was written, if it has a Channel
    * and a person wrote it.
    */
@@ -98,7 +122,7 @@ export class Replies extends EnginePart {
     this.takeUp(ticket.id, trigger.id)
     return { id, status: this.options.outbox.status(id) ?? 'pending', reused: existing !== undefined }
   }
-  private answer(request: Exclude<ReplyRequest, { purpose: 'acknowledgement' } | { purpose: 'progress' }>): Reply {
+  private answer(request: Exclude<ReplyRequest, { purpose: 'acknowledgement' } | { purpose: 'progress' } | { purpose: 'alert' }>): Reply {
     const trigger = request.triggerId ? this.repo.triggers.get(request.triggerId) : undefined
     if (request.triggerId && !trigger) throw new UserError('unknownTrigger')
     const ticket = request.ticketId ? this.require(request.ticketId)

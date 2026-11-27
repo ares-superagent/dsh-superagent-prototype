@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest'
 import { Engine, MemoryRepositories, type Assignment, type ChannelRef, type OutboundMessage, type Policy, type Ticket }
   from '../src/core/index.ts'
 import { Progress, type ProgressActivity } from '../src/app/progress.ts'
+import type { ToolFailureSignal } from '../src/infra/tool-failure.ts'
 import { wordCount } from '../src/infra/text.ts'
 
 const AT = '2026-09-23T00:00:00.000Z'
@@ -24,11 +25,14 @@ const policy: Policy = { version: 'v1', paused: false, evalTimeoutMs: 60_000,
 const health = { get: () => undefined, set: () => {}, release: () => {} }
 
 /** A runtime with one open ticket, a real Engine and outbox, a controllable clock and worker activity. */
-function harness(overrides: Partial<Ticket> = {}, options: { intervalMs?: number; stalledAfterMs?: number } = {}) {
+function harness(overrides: Partial<Ticket> = {}, options: { intervalMs?: number; stalledAfterMs?: number; startDeadlineMs?: number } = {}) {
   const repo = new MemoryRepositories()
   const sent: OutboundMessage[] = []
   let clock = Date.parse(AT)
   let activity: ProgressActivity | undefined
+  // A running assignment recorded its first action at its start unless a test clears it.
+  let firstAction: string | undefined = AT
+  let blocking: ToolFailureSignal | undefined
   let pending = false
   const engine = new Engine({ repo, scope: { scope: () => ({ listened: true, observed: false }) }, policy: () => policy,
     assessor: { request: () => {} }, executor: { start: () => {}, deliver: () => {}, stop: () => {} },
@@ -36,13 +40,18 @@ function harness(overrides: Partial<Ticket> = {}, options: { intervalMs?: number
       status: id => sent.some(item => item.id === id) ? 'pending' : undefined, withdraw: () => {} },
     now: () => new Date(clock).toISOString() })
   repo.tickets.save(ticket(overrides))
-  const make = () => new Progress({ tickets: () => repo.tickets.open(), publish: (id, update) => { engine.publishProgress(id, update) },
-    activity: () => activity, pending: () => pending, now: () => new Date(clock).toISOString(), paused: () => false, closing: () => false,
+  const make = () => new Progress({ tickets: () => repo.tickets.open(),
+    publish: (id, update) => { engine.publishProgress(id, update) },
+    alert: (id, key, text) => { engine.publishAlert(id, { key, text }) },
+    activity: () => activity, firstAction: () => firstAction, blocking: () => blocking,
+    pending: () => pending, now: () => new Date(clock).toISOString(), paused: () => false, closing: () => false,
     health }, options)
   let progress = make()
   return { repo, engine, sent, progress,
     advance: (minutes: number) => { clock += minutes * 60_000 },
     setActivity: (value: ProgressActivity | undefined) => { activity = value },
+    setFirstAction: (value: string | undefined) => { firstAction = value },
+    setBlocking: (value: ToolFailureSignal | undefined) => { blocking = value },
     setPending: (value: boolean) => { pending = value },
     restart: () => { progress.stop(); progress = make(); return progress },
     at: (minutes: number) => new Date(Date.parse(AT) + minutes * 60_000).toISOString() }
@@ -92,19 +101,20 @@ describe('progress cadence', () => {
   })
   it('reports a queued assignment once, and again when it starts', async () => {
     const h = harness({ assignments: [assignment({ state: 'pending', startedAt: undefined })] })
+    const progress = () => h.sent.filter(message => message.kind === 'progress')
     h.advance(10)
     await h.progress.pump()
-    expect(h.sent).toHaveLength(1)
-    expect(h.sent[0]!.text).toContain('worker slot')
+    expect(progress()).toHaveLength(1)
+    expect(progress()[0]!.text).toContain('worker slot')
     expect(lastProgress(h)).toMatchObject({ phase: 'queued' })
     h.advance(10)
     await h.progress.pump()
-    expect(h.sent).toHaveLength(1)
+    expect(progress()).toHaveLength(1)
     h.engine.assignmentStarted('ticket-1', 'a1')
     h.setActivity({ at: h.at(20), kind: 'model' })
     h.advance(10)
     await h.progress.pump()
-    expect(h.sent).toHaveLength(2)
+    expect(progress()).toHaveLength(2)
     expect(lastProgress(h)).toMatchObject({ phase: 'active' })
   })
   it('reports a stalled assignment once, tells it from active work, and resumes after activity', async () => {
@@ -190,5 +200,58 @@ describe('progress cadence', () => {
     expect(h.sent[0]!.text).toContain('no worker Session event has been recorded')
     expect(h.sent[0]!.text).toContain('check the worker\'s session')
     expect(h.sent[0]!.text).toContain('cause is unknown')
+  })
+  it('raises one start alarm when a launch is still queued a minute after acceptance', async () => {
+    const h = harness({ assignments: [assignment({ state: 'pending', startedAt: undefined })] })
+    h.advance(0.5)
+    await h.progress.pump()
+    expect(h.sent.filter(message => message.kind === 'alert')).toEqual([])
+    h.advance(0.5)
+    await h.progress.pump()
+    const alerts = h.sent.filter(message => message.kind === 'alert')
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]!.text).toContain('Start alarm')
+    expect(alerts[0]!.text).toContain('worker slot')
+    expect(alerts[0]!.text.startsWith('This is by an automated agent, not a human.')).toBe(true)
+    // The same start alarm is not queued again while the assignment stays queued.
+    h.advance(2)
+    await h.progress.pump()
+    expect(h.sent.filter(message => message.kind === 'alert')).toHaveLength(1)
+  })
+  it('raises a start alarm when the launched Session records no first action', async () => {
+    const h = harness()
+    h.setFirstAction(undefined)
+    h.advance(0.5)
+    await h.progress.pump()
+    expect(h.sent.filter(message => message.kind === 'alert')).toEqual([])
+    h.advance(0.5)
+    await h.progress.pump()
+    const alerts = h.sent.filter(message => message.kind === 'alert')
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]!.text).toContain('no first action')
+    // A first action clears the condition and the alarm is never repeated.
+    h.setFirstAction(h.at(2))
+    h.advance(10)
+    await h.progress.pump()
+    expect(h.sent.filter(message => message.kind === 'alert')).toHaveLength(1)
+  })
+  it('reports a blocking tool failure immediately, with the tool and the smallest action', async () => {
+    const h = harness()
+    h.setBlocking({ category: 'authentication', tool: 'gh', reason: 'the `gh` tool reported an authentication or credential failure',
+      action: 'sign in or provide the missing credential for `gh`, then retry the ticket.' })
+    await h.progress.pump()
+    const alerts = h.sent.filter(message => message.kind === 'alert')
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]!.text).toContain('Blocked')
+    expect(alerts[0]!.text).toContain('`gh`')
+    expect(alerts[0]!.text).toContain('sign in or provide the missing credential')
+    expect(alerts[0]!.text).toContain('This is by an automated agent, not a human.')
+    // A cleared failure stops the alarm; the same problem is not queued twice.
+    h.setBlocking(undefined)
+    await h.progress.pump()
+    h.setBlocking({ category: 'authentication', tool: 'gh', reason: 'the `gh` tool reported an authentication or credential failure',
+      action: 'sign in or provide the missing credential for `gh`, then retry the ticket.' })
+    await h.progress.pump()
+    expect(h.sent.filter(message => message.kind === 'alert')).toHaveLength(1)
   })
 })

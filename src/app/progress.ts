@@ -5,16 +5,21 @@
  * It reads what the Engine and the Executor already recorded, so it never asks a model for anything and needs no tool call.
  * A Worker's latest `progress` report supplies what is complete; the rest — what runs now, the next action and any blocker —
  * comes from the Assignment's stage and the last Session event, which also tells a stalled worker from one waiting on a tool.
+ * The same check sends immediate alerts, without waiting for the interval, when a launch did not start, the worker Session
+ * recorded no first action, or a tool failure needs a person; those are deterministic too.
  */
 import { latestAssignment, ticketStage } from '../core/index.ts'
 import type { Assignment, ProgressPhase, ProgressUpdate, Ticket } from '../core/index.ts'
 import type { HealthEntry } from '../infra/health.ts'
+import type { ToolFailureSignal } from '../infra/tool-failure.ts'
 import { wordCount } from '../infra/text.ts'
 
 /** The interval between progress updates, as the operator approved it. */
 export const PROGRESS_INTERVAL_MS = 10 * 60_000
 /** How long without a recorded worker Session event before an Assignment looks stalled rather than active. */
 export const STALLED_AFTER_MS = 30 * 60_000
+/** How long after acceptance a launch or its first Session action may take before the runtime raises a start alarm. */
+export const START_DEADLINE_MS = 60_000
 /** How often the cadence looks for a due update; an update itself is due only at the interval above. */
 const CHECK_MS = 60_000
 const MINUTE_MS = 60_000
@@ -33,6 +38,12 @@ export interface ProgressHost {
   publish(ticketId: string, update: ProgressUpdate): void
   /** What the ticket's worker Session last did; undefined while its Assignment has not started. */
   activity(ticketId: string): ProgressActivity | undefined
+  /** When the worker Session recorded its first action; undefined until then, so a launch without one shows as a start alarm. */
+  firstAction(ticketId: string): string | undefined
+  /** A tool failure that needs a person, while no later successful result cleared it. */
+  blocking(ticketId: string): ToolFailureSignal | undefined
+  /** Queue an immediate alert in the ticket's source conversation; the key keeps the same problem idempotent per Assignment. */
+  alert(ticketId: string, key: string, text: string): void
   /** Whether an earlier progress message for the ticket has not gone out yet; another would only queue behind it. */
   pending(ticketId: string): boolean
   now(): string
@@ -41,7 +52,7 @@ export interface ProgressHost {
   health: HealthEntry
 }
 /** Timing overrides for tests; production always uses the approved ten-minute cadence. */
-export interface ProgressOptions { intervalMs?: number; stalledAfterMs?: number; checkMs?: number }
+export interface ProgressOptions { intervalMs?: number; stalledAfterMs?: number; checkMs?: number; startDeadlineMs?: number }
 const segmenter = new Intl.Segmenter('zh', { granularity: 'word' })
 /** Formats a timestamp as its UTC hour and minute, which is stable across deployments. */
 const clock = (value: string | number): string => {
@@ -81,6 +92,11 @@ function lastSeen(activity: ProgressActivity): string {
  * `working`: its first ten minutes after the Assignment started, then ten minutes after every update it published. A
  * `queued` or `stalled` state is published once, until it changes, so a long wait does not repeat the same message; a
  * restart reads the Assignment's `progress` note and continues where the previous process stopped without a duplicate.
+ *
+ * Before the interval, one immediate alert goes out per Assignment when its launch is still queued a minute after
+ * acceptance, when a launched worker Session recorded no first action in that minute, or when a tool failure needs a
+ * person. The alert path is separate from the cadence, so it neither resets the ten-minute interval nor changes the
+ * Assignment's progress note.
  */
 export class Progress {
   private timer?: ReturnType<typeof setInterval>
@@ -88,10 +104,12 @@ export class Progress {
   private readonly intervalMs: number
   private readonly stalledAfterMs: number
   private readonly checkMs: number
+  private readonly startDeadlineMs: number
   constructor(private readonly host: ProgressHost, options: ProgressOptions = {}) {
     this.intervalMs = options.intervalMs ?? PROGRESS_INTERVAL_MS
     this.stalledAfterMs = options.stalledAfterMs ?? STALLED_AFTER_MS
     this.checkMs = options.checkMs ?? CHECK_MS
+    this.startDeadlineMs = options.startDeadlineMs ?? START_DEADLINE_MS
   }
   /** Starts the minute check that publishes whichever update is due; safe to call once. */
   start(): void {
@@ -128,6 +146,8 @@ export class Progress {
     const at = Date.parse(this.host.now())
     const started = Date.parse(assignment.startedAt ?? assignment.createdAt)
     if (!Number.isFinite(at) || !Number.isFinite(started)) return
+    // Immediate alarms run before the interval and do not touch the Assignment's progress note.
+    this.alarm(ticket, assignment, at)
     const last = assignment.progress
     const anchor = Math.max(last ? Date.parse(last.at) : 0, started)
     if (at - anchor < this.intervalMs) return
@@ -139,6 +159,42 @@ export class Progress {
     if (last && last.phase === phase && phase !== 'active') return
     this.host.publish(ticket.id, { text: this.text(assignment, activity, phase, at), at: this.host.now(),
       due: new Date(anchor + this.intervalMs).toISOString(), phase })
+  }
+  /**
+   * Sends one immediate alert per Assignment when it needs a person sooner than the cadence: a blocking tool failure first,
+   * then a launch that is still queued after the start deadline, then a launched worker Session with no first action. The
+   * alert key is deterministic, so the same problem is queued at most once; the caller's outbox keeps that idempotent.
+   */
+  private alarm(ticket: Ticket, assignment: Assignment, at: number): void {
+    const started = Date.parse(assignment.startedAt ?? assignment.createdAt)
+    if (!Number.isFinite(started)) return
+    // A blocking tool failure is urgent from the moment it happens, even within the start deadline.
+    const blocking = assignment.state === 'running' ? this.host.blocking(ticket.id) : undefined
+    if (blocking) {
+      this.host.alert(ticket.id, `tool:${blocking.category}`, this.blockedText(assignment, blocking, at))
+      return
+    }
+    if (at - started < this.startDeadlineMs) return
+    if (assignment.state === 'pending') {
+      this.host.alert(ticket.id, 'start', this.startText(assignment, at, 'queued'))
+    } else if (assignment.state === 'running' && !this.host.firstAction(ticket.id)) {
+      this.host.alert(ticket.id, 'start', this.startText(assignment, at, 'silent'))
+    }
+  }
+  /** The start alarm's text: the launch did not happen, or the launched Session recorded no first action. */
+  private startText(assignment: Assignment, at: number, kind: 'queued' | 'silent'): string {
+    const started = Date.parse(assignment.startedAt ?? assignment.createdAt)
+    const waited = `${minutes(started, at)} min`
+    const lines = kind === 'queued'
+      ? [`the launch has not started ${waited} after acceptance: it is still waiting for a free worker slot.`,
+        'it starts as soon as a worker slot frees; retry the ticket only if it stays queued.']
+      : [`the worker Session was launched ${waited} ago but has recorded no first action (no model step or tool call).`,
+        'check the worker\'s Session, then retry the ticket if it cannot continue.']
+    return fitWords(`**Start alarm** — ${lines[0]}\n- Next: ${lines[1]}\n- Blocker: the launch or its first action did not happen within ${minutes(0, this.startDeadlineMs)} min.`, MAX_WORDS)
+  }
+  /** The blocking alert's text: the tool, the fixed reason, and the smallest action a person must take. */
+  private blockedText(assignment: Assignment, blocking: ToolFailureSignal, at: number): string {
+    return fitWords(`**Blocked** — ${blocking.reason} at ${clock(at)}.\n- Action: ${blocking.action}\n- Completed: ${assignment.report?.state === 'progress' ? 'the worker reported progress before this failure.' : 'no worker report yet.'}\n- Note: the runtime sent this alert immediately; the worker may still be trying, so its own report remains the final status.`, MAX_WORDS)
   }
   /** What the update says the worker is doing: queued for a slot, stalled, or active. */
   private phase(assignment: Assignment, activity: ProgressActivity | undefined, at: number): ProgressPhase {

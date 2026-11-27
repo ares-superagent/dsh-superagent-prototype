@@ -17,10 +17,19 @@ import type { Sessions } from '../app/sessions.ts'
 import { WorktreeNameSchema } from '../app/assessment.ts'
 import { resultRelay } from '../app/notices.ts'
 import type { ProgressActivity } from '../app/progress.ts'
+import { accessFailure, type ToolFailureSignal } from '../infra/tool-failure.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { cancelled, collectJob, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
 
 const now = (): string => new Date().toISOString()
+/** The text of a tool result's content blocks, capped, for the deterministic failure match; it is never published raw. */
+function resultText(content: unknown): string {
+  if (!Array.isArray(content)) return ''
+  return content.flatMap(block => {
+    const item = block as { type?: unknown; text?: unknown }
+    return item.type === 'text' && typeof item.text === 'string' ? [item.text] : []
+  }).join('\n').slice(0, 4000)
+}
 /** Returns the worker session ID (`worker-<ticketId>`) for a ticket. */
 export const workerSessionId = (ticketId: string): string => `worker-${ticketId}`
 /** Returns the ticket ID for a worker session ID (`worker-<ticketId>`), or undefined for non-worker sessions. */
@@ -230,6 +239,12 @@ export class DshExecutor implements Executor {
    * work. It is session activity, not a claim that the work goes on, and an entry is dropped when its ticket's worker stops.
    */
   private readonly lastActivity = new Map<string, ProgressActivity>()
+  /** When each worker Session recorded its first action, for the start alarm; set once per ticket. */
+  private readonly firstActionAt = new Map<string, string>()
+  /** The tool name of a `tool/call`, by ticket and call id, so its result can name the tool in a blocking alert. */
+  private readonly toolNames = new Map<string, string>()
+  /** A tool failure that needs a person, by ticket, until a later successful result clears it. */
+  private readonly blockingFailures = new Map<string, ToolFailureSignal>()
   /** When the look at a ticket's background work began, so a long wait reads as waiting on that work. */
   private readonly settlingSince = new Map<string, string>()
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
@@ -365,6 +380,8 @@ export class DshExecutor implements Executor {
   stop(ticket: Ticket, assignment: Assignment, reason: string): void {
     this.transient.delete(assignment.id); this.transient.delete(`launch:${assignment.id}`)
     this.lastActivity.delete(ticket.id); this.settlingSince.delete(ticket.id)
+    this.firstActionAt.delete(ticket.id); this.blockingFailures.delete(ticket.id)
+    for (const key of this.toolNames.keys()) if (key.startsWith(`${ticket.id}:`)) this.toolNames.delete(key)
     const report = assignment.report
     const busy = !!assignment.deliveredAt && !!report && assignment.deliveredAt >= report.at
     const ownTurn = (report?.state === 'ready' || report?.state === 'dropped') && !busy
@@ -419,17 +436,44 @@ export class DshExecutor implements Executor {
     if (this.settling.has(ticketId)) return { at: this.settlingSince.get(ticketId) ?? last?.at ?? now(), kind: 'background' }
     return last
   }
+  /** When the ticket's worker Session recorded its first real action, for the runtime's start alarm; undefined until then. */
+  firstAction(ticketId: string): string | undefined { return this.firstActionAt.get(ticketId) }
+  /** A tool failure that needs a person, for the runtime's immediate blocked alert; a successful result clears it. */
+  blocking(ticketId: string): ToolFailureSignal | undefined { return this.blockingFailures.get(ticketId) }
   /** Records what a worker Session just did, for the progress cadence; dropped with its ticket's turn. */
   private markActivity(ticketId: string, kind: ProgressActivity['kind'], detail?: string): void {
     this.lastActivity.set(ticketId, { at: now(), kind, ...detail ? { detail } : {} })
   }
-  /** Translates the Session events that show what a worker is doing into `lastActivity` for the progress cadence. */
+  /** Marks the first action of a worker Session's turn, which a launch waits for before the runtime raises a start alarm. */
+  private markFirstAction(ticketId: string): void { if (!this.firstActionAt.has(ticketId)) this.firstActionAt.set(ticketId, now()) }
+  /**
+   * Translates the Session events for the progress cadence and the immediate alerts: the first action, the last activity, and
+   * a `tool/result` that failed for access or credentials. Any success clears a recorded blocking failure, so a worker that
+   * recovers before the next check is not reported as blocked.
+   */
   private trackSession(ticketId: string, event: { type: string; data?: unknown }): void {
     if (this.host.closing()) return
+    const data = (event.data ?? {}) as { callId?: unknown; name?: unknown; message?: { toolCallId?: unknown; isError?: unknown; content?: unknown };
+      error?: { name?: string; code?: string; reason?: string } }
+    const callId = typeof data.callId === 'string' ? data.callId : undefined
+    const resultCallId = typeof data.message?.toolCallId === 'string' ? data.message.toolCallId : undefined
     if (event.type === 'tool/call') {
-      const name = (event.data as { name?: unknown } | undefined)?.name
-      this.markActivity(ticketId, 'tool', typeof name === 'string' ? name : undefined)
-    } else if (event.type === 'tool/result' || event.type === 'assistant/message' || event.type === 'step/start' || event.type === 'turn/start') {
+      this.markFirstAction(ticketId)
+      const name = typeof data.name === 'string' ? data.name : undefined
+      if (name && callId) this.toolNames.set(`${ticketId}:${callId}`, name)
+      this.markActivity(ticketId, 'tool', name)
+    } else if (event.type === 'tool/result') {
+      this.markFirstAction(ticketId)
+      const tool = resultCallId ? this.toolNames.get(`${ticketId}:${resultCallId}`) : undefined
+      if (resultCallId) this.toolNames.delete(`${ticketId}:${resultCallId}`)
+      const failed = data.message?.isError === true || !!data.error
+      if (failed) {
+        const failure = accessFailure({ ...tool ? { tool } : {}, ...data.error ? { error: data.error } : {}, text: resultText(data.message?.content) })
+        if (failure) this.blockingFailures.set(ticketId, failure)
+      } else this.blockingFailures.delete(ticketId)
+      this.markActivity(ticketId, 'model')
+    } else if (event.type === 'assistant/message' || event.type === 'step/start' || event.type === 'turn/start') {
+      this.markFirstAction(ticketId)
       this.markActivity(ticketId, 'model')
     }
   }
@@ -555,7 +599,7 @@ export class DshExecutor implements Executor {
     for (const dispose of this.disposers.splice(0)) dispose()
     for (const timer of this.timers) clearTimeout(timer)
     this.timers.clear()
-    this.lastActivity.clear(); this.settlingSince.clear()
+    this.lastActivity.clear(); this.settlingSince.clear(); this.firstActionAt.clear(); this.toolNames.clear(); this.blockingFailures.clear()
   }
   /**
    * Reconciles running and pending assignments across open tickets after a host restart: notifies Engine of interrupted
